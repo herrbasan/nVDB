@@ -81,12 +81,35 @@ impl Database {
     pub fn list_collections(&self) -> Vec<String> {
         self.inner.list_collections()
     }
+
+    /// Drop (delete) a collection
+    #[napi]
+    pub fn drop_collection(&self, name: String) -> Result<()> {
+        self.inner
+            .drop_collection(&name)
+            .map_err(|e| Error::from_reason(format!("Failed to drop collection: {}", e)))
+    }
 }
 
 /// Collection options for creation
 #[napi(object)]
 pub struct CollectionOptions {
     pub durability: Option<String>,
+}
+
+/// HNSW index parameters
+#[napi(object)]
+pub struct HnswParamsJs {
+    pub m: Option<u32>,
+    pub ef_construction: Option<u32>,
+    pub ef_search: Option<u32>,
+}
+
+/// Rebuild index options
+#[napi(object)]
+pub struct RebuildIndexOptions {
+    pub params: Option<HnswParamsJs>,
+    pub distance: Option<String>,
 }
 
 /// Collection class for Node.js
@@ -275,11 +298,12 @@ impl Collection {
         })
     }
 
-    /// Rebuild the HNSW index
+    /// Rebuild the HNSW index with optional parameters
     #[napi]
-    pub fn rebuild_index(&self) -> Result<()> {
+    pub fn rebuild_index(&self, options: Option<RebuildIndexOptions>) -> Result<()> {
+        let (params, distance) = convert_rebuild_options(options)?;
         self.inner
-            .rebuild_index()
+            .rebuild_index(params, distance)
             .map_err(|e| Error::from_reason(format!("Failed to rebuild index: {}", e)))
     }
 
@@ -467,4 +491,31 @@ impl FilterBuilder {
         let filter = Filter::Or(filter_objs);
         Ok(serde_json::to_string(&filter).unwrap())
     }
+}
+
+/// Helper function to convert JS rebuild options to Rust types
+fn convert_rebuild_options(options: Option<RebuildIndexOptions>) -> Result<(Option<ndb::HnswParams>, Option<ndb::Distance>)> {
+    let params = options.as_ref().and_then(|o| o.params.as_ref()).map(|p| {
+        let mut params = ndb::HnswParams::default();
+        if let Some(m) = p.m {
+            params = ndb::HnswParams::with_m(m as usize);
+        }
+        if let Some(ef_construction) = p.ef_construction {
+            params = params.with_ef_construction(ef_construction as usize);
+        }
+        if let Some(ef_search) = p.ef_search {
+            params = params.with_ef_search(ef_search as usize);
+        }
+        params
+    });
+
+    let distance = options.as_ref().and_then(|o| o.distance.as_ref()).map(|d| {
+        match d.as_str() {
+            "dot" => ndb::Distance::DotProduct,
+            "euclidean" => ndb::Distance::Euclidean,
+            _ => ndb::Distance::Cosine,
+        }
+    });
+
+    Ok((params, distance))
 }

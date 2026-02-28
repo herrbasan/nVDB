@@ -186,7 +186,7 @@ impl DatabaseManifest {
         }
     }
 
-    fn remove_collection(&mut self, name: &str) {
+    pub fn remove_collection(&mut self, name: &str) {
         self.collections.retain(|c| c != name);
     }
 }
@@ -306,6 +306,33 @@ impl Database {
     pub fn list_collections(&self) -> Vec<String> {
         let manifest = self.manifest.lock().unwrap();
         manifest.collections.clone()
+    }
+
+    /// Drop (delete) a collection and all its data.
+    ///
+    /// This permanently removes the collection directory and all its contents.
+    /// The collection must not be open elsewhere.
+    pub fn drop_collection(&self, name: &str) -> Result<()> {
+        let collection_path = self.path.join(name);
+
+        if !collection_path.exists() {
+            return Err(Error::CollectionNotFound {
+                name: name.to_string(),
+            });
+        }
+
+        // Remove from manifest first
+        {
+            let mut manifest = self.manifest.lock().unwrap();
+            manifest.remove_collection(name);
+            manifest.save(&self.path)?;
+        }
+
+        // Delete collection directory
+        fs::remove_dir_all(&collection_path)
+            .map_err(Error::io_err(&collection_path, "failed to remove collection directory"))?;
+
+        Ok(())
     }
 }
 
@@ -1001,9 +1028,14 @@ impl Collection {
     ///
     /// This operation can be expensive for large collections.
     /// It scans all segments and memtable, then builds the index from scratch.
-    pub fn rebuild_index(&self) -> Result<()> {
-        let params = HnswParams::default();
-        let distance = Distance::Cosine; // TODO: make configurable
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Optional HNSW parameters. Uses defaults if None.
+    /// * `distance` - Optional distance metric. Uses Cosine if None.
+    pub fn rebuild_index(&self, params: Option<HnswParams>, distance: Option<Distance>) -> Result<()> {
+        let params = params.unwrap_or_default();
+        let distance = distance.unwrap_or(Distance::Cosine);
 
         // Collect all vectors from segments
         let segments = self.segments.load();
