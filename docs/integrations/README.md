@@ -2,33 +2,37 @@
 
 This directory contains integration guides for using nDB in different environments and languages.
 
-## Integration Options
+## Core Library vs Integrations
 
-All three integration approaches are **officially supported and maintained**. Choose based on your deployment constraints, not hierarchy.
+**nDB core** is an **embedded library** - it runs in-process with your Rust application. The integrations below are optional ways to use nDB from other languages or environments:
 
 | Integration | Best For | Performance | File System |
 |-------------|----------|-------------|-------------|
-| **[N-API](./napi.md)** | Node.js servers, maximum performance | Native speed | Full (mmap) |
-| **[WebAssembly](./wasm.md)** | Browser/Edge, no native dependencies | ~80-90% native | In-memory only |
-| **[gRPC](./grpc.md)** | Multi-language, distributed systems | Network overhead | Full (service) |
+| **[Rust](./user-guide.md)** | Embedded in your app | Native speed | Full (mmap) |
+| **[N-API](./napi.md)** | Node.js apps | Native speed | Full (mmap) |
+| **[WebAssembly](./wasm.md)** | Browser/Edge | ~80-90% native | In-memory only |
+| **[gRPC](./grpc.md)** | Multi-language, network access | Network overhead | Full (service) |
 
 ## Quick Selection Guide
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  What is your deployment environment?                       │
-└─────────────────────────────────────────────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                     ▼                     ▼
-   Node.js server       Browser/Edge           Multi-language
-   (Express, etc.)      (Vercel, CF)          or microservices
-        │                     │                     │
-        ▼                     ▼                     ▼
-   ┌─────────┐          ┌─────────┐           ┌─────────┐
-   │  N-API  │          │   WASM  │           │  gRPC   │
-   │  napi   │          │   wasm  │           │  grpc   │
-   └─────────┘          └─────────┘           └─────────┘
+What is your deployment environment?
+
+  ┌─────────────┐
+  │  Rust app?  │───yes──▶ nDB crate (see User Guide)
+  └──────┬──────┘
+         │no
+  ┌──────▼──────┐
+  │Node.js srv? │───yes──▶ N-API
+  └──────┬──────┘
+         │no
+  ┌──────▼──────┐
+  │Browser/Edge?│───yes──▶ WebAssembly
+  └──────┬──────┘
+         │no
+  ┌──────▼──────┐
+  │   Other?     │───yes──▶ gRPC service
+  └─────────────┘
 ```
 
 ## Installation

@@ -6,17 +6,19 @@
 
 ## Core Scope
 
-nDB does **one thing well**: **high-performance vector storage and similarity search**.
+nDB is an **embedded library** - it runs in-process with your application, like SQLite for vectors. It does **one thing well**: **high-performance vector storage and similarity search**.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      YOUR APPLICATION                       │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
-│  │   Text/     │───▶│  Embedding  │───▶│  nDB: Vector    │ │
-│  │   Data      │    │  Service    │    │  Storage/Search │ │
-│  │  (Your job) │    │  (Your job) │    │   (Our job)     │ │
-│  └─────────────┘    └─────────────┘    └─────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+Your App                          nDB
+┌──────────────┐    ┌───────────────────────┐
+│ Text/Data    │───▶│ Embedding Service     │──┐
+│ (your job)   │    │ (your job)            │  │
+└──────────────┘    └───────────────────────┘  │
+                                                 ▼
+                                         ┌───────────────────────┐
+                                         │ Vector Storage/Search │
+                                         │ (nDB's job)           │
+                                         └───────────────────────┘
 ```
 
 ### nDB Handles:
@@ -24,7 +26,7 @@ nDB does **one thing well**: **high-performance vector storage and similarity se
 - ✅ Similarity search (exact & HNSW approximate)
 - ✅ Multi-collection management
 - ✅ Persistence and crash recovery
-- ✅ Multi-process safety (single writer, multiple readers)
+- ✅ Embedded in your application (single writer, your app)
 
 ### nDB Does NOT Handle:
 - ❌ Text embedding generation

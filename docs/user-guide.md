@@ -37,10 +37,11 @@ nDB is a high-performance, embedded, in-memory vector database designed for LLM 
 
 ### When NOT to Use nDB
 
+- Client-server architecture (use Qdrant, Milvus, etc.)
 - Distributed/multi-node requirements
+- Multiple independent applications writing to the same data
 - Complex multi-document transactions
 - SQL-style queries with joins
-- Write-heavy workloads with high concurrency
 
 ---
 

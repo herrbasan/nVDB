@@ -35,19 +35,16 @@ nDB is designed as an embedded vector database for applications requiring high-p
 ### Integration Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           Your Application              │
-│  ┌─────────────┐    ┌────────────────┐ │
-│  │   Business  │───▶│   nDB Embed    │ │
-│  │    Logic    │◀───│   (in-process) │ │
-│  └─────────────┘    └────────────────┘ │
-└─────────────────────────────────────────┘
-              │
-              ▼
-┌─────────────────────────────────────────┐
-│         Local Filesystem                │
-│    (WAL, Segments, Index Files)         │
-└─────────────────────────────────────────┘
+┌─ Your Application ────────────────┐
+│                                     │
+│  Business Logic ←→ nDB (embedded) │
+│                                     │
+└─────────────────┬───────────────────┘
+                  │
+                  ▼
+┌─ Local Filesystem ─────────────────┐
+│  WAL  •  Segments  •  Index Files │
+└─────────────────────────────────────┘
 ```
 
 ---
