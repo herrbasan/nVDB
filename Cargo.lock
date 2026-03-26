@@ -655,6 +655,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbridge"
+version = "0.1.0"
+dependencies = [
+ "napi",
+ "napi-derive",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -693,6 +704,7 @@ version = "0.1.0"
 dependencies = [
  "napi",
  "napi-derive",
+ "nbridge",
  "nvdb",
  "serde",
  "serde_json",
