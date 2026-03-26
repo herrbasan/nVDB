@@ -4,11 +4,12 @@
 //! that stores document embeddings and retrieves relevant
 //! context for LLM prompts.
 
-use ndb::{Database, CollectionConfig, Document, Search, Filter, Durability};
+use nvdb::{Database, CollectionConfig, Document, Search, Filter, Durability};
+use std::sync::Arc;
 
 /// A simple RAG system implementation
 pub struct SimpleRAG {
-    db: Database,
+    db: Arc<Database>,
 }
 
 impl SimpleRAG {
@@ -17,7 +18,7 @@ impl SimpleRAG {
         let db = Database::open(data_dir)?;
         
         // Create collection for document chunks if it doesn't exist
-        if !db.has_collection("chunks")? {
+        if !db.list_collections().contains(&"chunks".to_string()) {
             // Use 1536 dimensions for OpenAI embeddings
             db.create_collection(
                 "chunks",
@@ -42,7 +43,7 @@ impl SimpleRAG {
         text: &str,
         embedding: Vec<f32>,
         source: &str,
-    ) -> Result<(), ndb::Error> {
+    ) -> Result<(), nvdb::Error> {
         let collection = self.db.get_collection("chunks")?;
         
         collection.insert(Document {
@@ -51,7 +52,7 @@ impl SimpleRAG {
             payload: Some(serde_json::json!({
                 "text": text,
                 "source": source,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "timestamp": "example",
             })),
         })?;
         
@@ -66,7 +67,7 @@ impl SimpleRAG {
         query_embedding: &[f32],
         top_k: usize,
         source_filter: Option<&str>,
-    ) -> Result<Vec<ContextChunk>, ndb::Error> {
+    ) -> Result<Vec<ContextChunk>, nvdb::Error> {
         let collection = self.db.get_collection("chunks")?;
         
         // Build search with optional filter
@@ -105,15 +106,15 @@ impl SimpleRAG {
     }
     
     /// Build HNSW index for faster retrieval
-    pub fn build_index(&self) -> Result<(), ndb::Error> {
+    pub fn build_index(&self) -> Result<(), nvdb::Error> {
         let collection = self.db.get_collection("chunks")?;
-        collection.rebuild_index()?;
+        collection.rebuild_index(None, None)?;
         println!("✓ Built HNSW index");
         Ok(())
     }
     
     /// Get statistics about the knowledge base
-    pub fn stats(&self) -> Result<KnowledgeBaseStats, ndb::Error> {
+    pub fn stats(&self) -> Result<KnowledgeBaseStats, nvdb::Error> {
         // This is a simplified example - real implementation would
         // query actual statistics from the database
         Ok(KnowledgeBaseStats {
@@ -138,7 +139,7 @@ pub struct KnowledgeBaseStats {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== nDB RAG System Example ===\n");
+    println!("=== nvdb RAG System Example ===\n");
     
     // Initialize RAG system
     let rag = SimpleRAG::new("./rag_data")?;

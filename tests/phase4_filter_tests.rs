@@ -2,7 +2,7 @@
 //!
 //! Tests for metadata filtering with Mongo-like filter DSL.
 
-use ndb::{CollectionConfig, Database, Distance, Document, Filter, Search};
+use nvdb::{CollectionConfig, Database, Distance, Document, Filter, Search};
 use tempfile::TempDir;
 
 fn create_doc_with_payload(id: &str, vector: Vec<f32>, payload: serde_json::Value) -> Document {
@@ -401,7 +401,7 @@ fn test_filter_with_approximate_search() {
     coll.flush().unwrap();
 
     // Build HNSW index from segments
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     assert!(coll.has_index(), "Index should be built");
 
     let query = vec![25.0, 50.0, 75.0, 100.0];

@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-14  
 **Status:** Accepted  
-**Deciders:** nDB Contributors
+**Deciders:** nVDB Contributors
 
 ## Context
 

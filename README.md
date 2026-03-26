@@ -1,13 +1,13 @@
-# nDB
+# nVDB
 
 A high-performance, embedded, in-memory vector database designed for LLM workflows.
 
 ## Overview
 
-nDB provides fast vector storage and similarity search with a minimal but complete API. It's designed for applications requiring low-latency vector operations without the overhead of a distributed database.
+nVDB provides fast vector storage and similarity search with a minimal but complete API. It's designed for applications requiring low-latency vector operations without the overhead of a distributed database.
 
 ```rust
-use ndb::{Database, CollectionConfig, Document, Search};
+use nVDB::{Database, CollectionConfig, Document, Search};
 
 let db = Database::open("./data")?;
 let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
@@ -33,14 +33,14 @@ let results = coll.search(Search::new(&query).top_k(10))?;
 | **Embedded library** | Integrated directly into your application |
 | **Single writer** | Natural for embedded use - your app is the only writer |
 
-## When to Use nDB
+## When to Use nVDB
 
 - Storing embeddings from LLMs (768-1536 dimensions)
 - Similarity search with optional metadata filtering
 - Read-heavy workloads with occasional bulk writes
 - Single-node deployments where embedded databases are appropriate
 
-## When NOT to Use nDB
+## When NOT to Use nVDB
 
 - Client-server architecture (use Qdrant, Milvus, etc.)
 - Distributed/multi-node requirements
@@ -53,14 +53,14 @@ let results = coll.search(Search::new(&query).top_k(10))?;
 ```toml
 # Cargo.toml
 [dependencies]
-ndb = "0.1"
+nVDB = "0.1"
 serde_json = "1.0"
 ```
 
 ## Quick Start
 
 ```rust
-use ndb::{Database, CollectionConfig, Document, Distance, Search};
+use nVDB::{Database, CollectionConfig, Document, Distance, Search};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open("./data")?;
@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 |----------|-------------|
 | [User Guide](docs/user-guide.md) | Complete API reference, configuration, best practices |
 | [Integration Guide](docs/integration-guide.md) | Integration patterns, platform setup, deployment |
-| [Scope & Boundaries](docs/scope-and-boundaries.md) | What nDB is and isn't |
+| [Scope & Boundaries](docs/scope-and-boundaries.md) | What nVDB is and isn't |
 | [Test Documentation](docs/test-documentation.md) | Test suite details |
 
 ## API Overview
@@ -183,10 +183,10 @@ cargo run --example web_service
 
 ## Architecture
 
-nDB is an **embedded library** - it runs in-process with your application, not as a separate server. Think of it like SQLite for vectors.
+nVDB is an **embedded library** - it runs in-process with your application, not as a separate server. Think of it like SQLite for vectors.
 
 ```
-Your Code → nDB (embedded) → WAL, Segments, Index (Filesystem)
+Your Code → nVDB (embedded) → WAL, Segments, Index (Filesystem)
 ```
 
 This design means:

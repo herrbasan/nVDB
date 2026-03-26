@@ -1,6 +1,6 @@
-//! nDB - High-performance embedded vector database
+//! nvdb - High-performance embedded vector database
 //!
-//! nDB is an embedded, in-memory vector database designed for LLM workflows.
+//! nvdb is an embedded, in-memory vector database designed for LLM workflows.
 //! It prioritizes reliability and performance over feature breadth.
 //!
 //! # Core Philosophy
@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use ndb::{Database, CollectionConfig, Durability, Document};
+//! use nvdb::{Database, CollectionConfig, Durability, Document};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let db = Database::open("data/")?;
@@ -688,7 +688,7 @@ impl Collection {
 
         // Generate segment filename
         let segment_id = self.segments.load().len() + 1;
-        let segment_filename = format!("{:04}.ndb", segment_id);
+        let segment_filename = format!("{:04}.nvdb", segment_id);
         let segment_path = self.path.join("segments").join(&segment_filename);
 
         // Build segment from frozen memtable

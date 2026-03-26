@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use ndb::{Filter, Search};
+//! use nvdb::{Filter, Search};
 //!
 //! // Simple equality filter
 //! let filter = Filter::eq("category", "books");
@@ -84,7 +84,7 @@ impl Filter {
     ///
     /// # Example
     /// ```
-    /// use ndb::Filter;
+    /// use nvdb::Filter;
     /// use serde_json::json;
     ///
     /// let filter = Filter::eq("category", "books");
@@ -100,7 +100,7 @@ impl Filter {
     ///
     /// # Example
     /// ```
-    /// use ndb::Filter;
+    /// use nvdb::Filter;
     ///
     /// let filter = Filter::gt("year", 2020);
     /// ```
@@ -149,7 +149,7 @@ impl Filter {
     ///
     /// # Example
     /// ```
-    /// use ndb::Filter;
+    /// use nvdb::Filter;
     /// use serde_json::json;
     ///
     /// let filter = Filter::in_("status", ["active", "pending"]);
@@ -167,7 +167,7 @@ impl Filter {
     ///
     /// # Example
     /// ```
-    /// use ndb::Filter;
+    /// use nvdb::Filter;
     ///
     /// let filter = Filter::and([
     ///     Filter::eq("category", "books"),
@@ -184,7 +184,7 @@ impl Filter {
     ///
     /// # Example
     /// ```
-    /// use ndb::Filter;
+    /// use nvdb::Filter;
     ///
     /// let filter = Filter::or([
     ///     Filter::eq("category", "books"),
@@ -275,13 +275,13 @@ use std::cmp::Ordering;
 ///
 /// // Direct field access
 /// assert_eq!(
-///     ndb::filter::get_field(&payload, "user"),
+///     nvdb::filter::get_field(&payload, "user"),
 ///     Some(&json!({"name": "alice", "age": 30}))
 /// );
 ///
 /// // Nested field access
 /// assert_eq!(
-///     ndb::filter::get_field(&payload, "user.name"),
+///     nvdb::filter::get_field(&payload, "user.name"),
 ///     Some(&json!("alice"))
 /// );
 /// ```

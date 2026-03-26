@@ -1,12 +1,12 @@
 /**
- * nDB Node.js Native Bindings - Git Submodule Version
+ * nVDB Node.js Native Bindings - Git Submodule Version
  * 
- * This module loads the native nDB bindings directly.
- * Build the native module first with: cargo build --release -p ndb-node
+ * This module loads the native nVDB bindings directly.
+ * Build the native module first with: cargo build --release -p nvdb-node
  * 
  * For git submodule workflow:
- * 1. Add nDB as submodule: git submodule add https://github.com/ndb/ndb.git ndb
- * 2. Build: cd ndb && cargo build --release -p ndb-node
+ * 1. Add nVDB as submodule: git submodule add https://github.com/nvdb/nvdb.git nVDB
+ * 2. Build: cd nVDB && cargo build --release -p nvdb-node
  * 3. The loader below will find the .node file (or .dll/.so/.dylib)
  */
 
@@ -21,16 +21,16 @@ function getNativeBinaryName() {
   // Map platform/arch to binary name
   const names = {
     'win32': {
-      'x64': 'ndb-node.win32-x64-msvc.node',
-      'arm64': 'ndb-node.win32-arm64-msvc.node'
+      'x64': 'nvdb-node.win32-x64-msvc.node',
+      'arm64': 'nvdb-node.win32-arm64-msvc.node'
     },
     'darwin': {
-      'x64': 'ndb-node.darwin-x64.node',
-      'arm64': 'ndb-node.darwin-arm64.node'
+      'x64': 'nvdb-node.darwin-x64.node',
+      'arm64': 'nvdb-node.darwin-arm64.node'
     },
     'linux': {
-      'x64': 'ndb-node.linux-x64-gnu.node',
-      'arm64': 'ndb-node.linux-arm64-gnu.node'
+      'x64': 'nvdb-node.linux-x64-gnu.node',
+      'arm64': 'nvdb-node.linux-arm64-gnu.node'
     }
   };
   
@@ -57,16 +57,16 @@ function findNativeBinary() {
     // 1. Same directory as this file (if copied/renamed)
     join(moduleDir, binaryName),
     // 2. Raw DLL name (Windows dev builds)
-    join(moduleDir, 'ndb_node.dll'),
+    join(moduleDir, 'nvdb_node.dll'),
     // 3. Parent directory (target/release relative to napi folder)
-    join(moduleDir, '..', 'target', 'release', 'ndb_node.dll'),
-    join(moduleDir, '..', 'target', 'release', 'libndb_node.so'),
-    join(moduleDir, '..', 'target', 'release', 'libndb_node.dylib'),
+    join(moduleDir, '..', 'target', 'release', 'nvdb_node.dll'),
+    join(moduleDir, '..', 'target', 'release', 'libnvdb_node.so'),
+    join(moduleDir, '..', 'target', 'release', 'libnvdb_node.dylib'),
     // 4. Direct build output (various platforms)
-    join(moduleDir, 'ndb_node.node'),
-    join(moduleDir, 'ndb_node.dll'),
-    join(moduleDir, 'libndb_node.so'),
-    join(moduleDir, 'libndb_node.dylib'),
+    join(moduleDir, 'nvdb_node.node'),
+    join(moduleDir, 'nvdb_node.dll'),
+    join(moduleDir, 'libnvdb_node.so'),
+    join(moduleDir, 'libnvdb_node.dylib'),
   ];
   
   for (const path of searchPaths) {
@@ -80,18 +80,18 @@ function findNativeBinary() {
     `Searched:\n` +
     searchPaths.map(p => `  - ${p}`).join('\n') +
     `\n\nTo build, run:\n` +
-    `  cd ndb/napi && node setup.js\n` +
+    `  cd nVDB/napi && node setup.js\n` +
     `\nOr manually:\n` +
-    `  cargo build --release -p ndb-node\n` +
-    `  copy target/release/ndb_node.dll napi/${binaryName}  (Windows)\n` +
-    `  ln -s target/release/libndb_node.so napi/${binaryName}  (Linux)\n` +
+    `  cargo build --release -p nvdb-node\n` +
+    `  copy target/release/nvdb_node.dll napi/${binaryName}  (Windows)\n` +
+    `  ln -s target/release/libnvdb_node.so napi/${binaryName}  (Linux)\n` +
     `\nYou can also set the environment variable:\n` +
-    `  NODE_NDB_NATIVE_PATH=/path/to/native/binary`
+    `  NODE_NVDB_NATIVE_PATH=/path/to/native/binary`
   );
 }
 
 // Allow override via environment variable
-const nativePath = process.env.NODE_NDB_NATIVE_PATH || findNativeBinary();
+const nativePath = process.env.NODE_NVDB_NATIVE_PATH || findNativeBinary();
 
 // Load the native module
 let nativeBinding;

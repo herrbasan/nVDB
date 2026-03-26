@@ -1,14 +1,14 @@
-//! nDB Node.js Native Bindings
+//! nvdb Node.js Native Bindings
 //!
-//! This crate provides N-API bindings for the nDB vector database,
+//! This crate provides N-API bindings for the nvdb vector database,
 //! enabling native-speed vector operations from Node.js.
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use ndb::{Database as RustDatabase, Collection as RustCollection, CollectionConfig, Document};
-use ndb::{Durability, Distance, Search, Filter};
+use nvdb::{Database as RustDatabase, Collection as RustCollection, CollectionConfig, Document};
+use nvdb::{Durability, Distance, Search, Filter};
 
 // FilterBuilder is exposed via napi
 
@@ -494,11 +494,11 @@ impl FilterBuilder {
 }
 
 /// Helper function to convert JS rebuild options to Rust types
-fn convert_rebuild_options(options: Option<RebuildIndexOptions>) -> Result<(Option<ndb::HnswParams>, Option<ndb::Distance>)> {
+fn convert_rebuild_options(options: Option<RebuildIndexOptions>) -> Result<(Option<nvdb::HnswParams>, Option<nvdb::Distance>)> {
     let params = options.as_ref().and_then(|o| o.params.as_ref()).map(|p| {
-        let mut params = ndb::HnswParams::default();
+        let mut params = nvdb::HnswParams::default();
         if let Some(m) = p.m {
-            params = ndb::HnswParams::with_m(m as usize);
+            params = nvdb::HnswParams::with_m(m as usize);
         }
         if let Some(ef_construction) = p.ef_construction {
             params = params.with_ef_construction(ef_construction as usize);
@@ -511,9 +511,9 @@ fn convert_rebuild_options(options: Option<RebuildIndexOptions>) -> Result<(Opti
 
     let distance = options.as_ref().and_then(|o| o.distance.as_ref()).map(|d| {
         match d.as_str() {
-            "dot" => ndb::Distance::DotProduct,
-            "euclidean" => ndb::Distance::Euclidean,
-            _ => ndb::Distance::Cosine,
+            "dot" => nvdb::Distance::DotProduct,
+            "euclidean" => nvdb::Distance::Euclidean,
+            _ => nvdb::Distance::Cosine,
         }
     });
 

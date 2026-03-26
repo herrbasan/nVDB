@@ -3,13 +3,13 @@ members = [".", "napi"]
 resolver = "2"
 
 [package]
-name = "ndb"
+name = "nvdb"
 version = "0.1.0"
 edition = "2021"
-authors = ["nDB Contributors"]
+authors = ["nvdb Contributors"]
 description = "High-performance embedded vector database"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ndb/ndb"
+repository = "https://github.com/nvdb/nvdb"
 keywords = ["vector", "database", "embedding", "simd", "hnsw"]
 categories = ["database", "data-structures"]
 rust-version = "1.75"

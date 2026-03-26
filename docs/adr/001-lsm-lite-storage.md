@@ -2,11 +2,11 @@
 
 **Date:** 2026-02-14  
 **Status:** Accepted  
-**Deciders:** nDB Contributors
+**Deciders:** nVDB Contributors
 
 ## Context
 
-nDB needed a storage architecture that balances:
+nVDB needed a storage architecture that balances:
 - Write throughput for batch embedding ingestion
 - Instant recovery regardless of dataset size
 - Durability guarantees for production use
@@ -58,4 +58,4 @@ Memtable (RAM) → WAL (disk) → Flush → Segments (mmap)
 ## References
 
 - LSM Tree paper: O'Neil et al., "The Log-Structured Merge-Tree"
-- nDB storage docs: `src/wal.rs`, `src/segment.rs`
+- nVDB storage docs: `src/wal.rs`, `src/segment.rs`

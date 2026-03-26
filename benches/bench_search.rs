@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use ndb::{Database, CollectionConfig, Distance, Search};
+use nvdb::{Database, CollectionConfig, Distance, Search};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -22,7 +22,7 @@ fn bench_exact_search(c: &mut Criterion) {
     // Insert test data
     let vectors = generate_vectors(10000, 128);
     for (i, vec) in vectors.iter().enumerate() {
-        collection.insert(ndb::Document {
+        collection.insert(nvdb::Document {
             id: format!("doc_{}", i),
             vector: vec.clone(),
             payload: Some(json!({"idx": i})),
@@ -61,7 +61,7 @@ fn bench_hnsw_search(c: &mut Criterion) {
     // Insert test data
     let vectors = generate_vectors(10000, 128);
     for (i, vec) in vectors.iter().enumerate() {
-        collection.insert(ndb::Document {
+        collection.insert(nvdb::Document {
             id: format!("doc_{}", i),
             vector: vec.clone(),
             payload: Some(json!({"idx": i})),
@@ -116,7 +116,7 @@ fn bench_filtered_search(c: &mut Criterion) {
     // Insert test data with payloads
     let vectors = generate_vectors(10000, 128);
     for (i, vec) in vectors.iter().enumerate() {
-        collection.insert(ndb::Document {
+        collection.insert(nvdb::Document {
             id: format!("doc_{}", i),
             vector: vec.clone(),
             payload: Some(json!({
@@ -127,7 +127,7 @@ fn bench_filtered_search(c: &mut Criterion) {
     }
     
     let query = generate_vectors(1, 128)[0].clone();
-    let filter = ndb::Filter::eq("category", "special");
+    let filter = nvdb::Filter::eq("category", "special");
     
     let mut group = c.benchmark_group("filtered_search");
     group.sample_size(100);
@@ -162,7 +162,7 @@ fn bench_search_dimensions(c: &mut Criterion) {
         // Insert test data
         let vectors = generate_vectors(1000, *dim);
         for (i, vec) in vectors.iter().enumerate() {
-            collection.insert(ndb::Document {
+            collection.insert(nvdb::Document {
                 id: format!("doc_{}", i),
                 vector: vec.clone(),
                 payload: None,

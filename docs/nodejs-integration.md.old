@@ -1,4 +1,4 @@
-# nDB Node.js Integration Guide
+# nVDB Node.js Integration Guide
 
 > **Version:** 0.1.0  
 > **Last Updated:** 2026-02-15  
@@ -23,7 +23,7 @@
 
 ## Overview
 
-This guide covers three ways to integrate nDB into Node.js projects. Since nDB is a Rust library, we provide multiple integration options to suit different deployment scenarios.
+This guide covers three ways to integrate nVDB into Node.js projects. Since nVDB is a Rust library, we provide multiple integration options to suit different deployment scenarios.
 
 ### Three Official Integration Approaches
 
@@ -91,7 +91,7 @@ Choose based on your constraints—not because one is "more official" than other
 
 ## JavaScript-First Philosophy
 
-All nDB Node.js bindings are **built for plain JavaScript first**. TypeScript definitions are provided as a courtesy for teams that use TS, but:
+All nVDB Node.js bindings are **built for plain JavaScript first**. TypeScript definitions are provided as a courtesy for teams that use TS, but:
 
 - ✅ No build step required
 - ✅ No type annotations in your code
@@ -99,7 +99,7 @@ All nDB Node.js bindings are **built for plain JavaScript first**. TypeScript de
 - ✅ Works with ES modules (`import`)
 - ✅ Full IntelliSense via JSDoc (VS Code, WebStorm, etc.)
 
-If you prefer TypeScript, type definitions are available via `@types/ndb-node` or included in the package.
+If you prefer TypeScript, type definitions are available via `@types/nvdb-node` or included in the package.
 
 ---
 
@@ -113,10 +113,10 @@ If you prefer TypeScript, type definitions are available via `@types/ndb-node` o
 ┌─────────────────────────────────────────────────────────────┐
 │                    Node.js Process                          │
 │  ┌─────────────────┐      ┌──────────────────────────────┐ │
-│  │   Your JS Code  │◄────►│   ndb.node (N-API addon)     │ │
+│  │   Your JS Code  │◄────►│   nVDB.node (N-API addon)     │ │
 │  │                 │      │   ┌────────────────────────┐ │ │
 │  │  const db =     │      │   │ napi-rs bindings       │ │ │
-│  │    new NDB()    │      │   │ ━━━━━━━━━━━━━━━━━━━━━  │ │ │
+│  │    new nVDB()    │      │   │ ━━━━━━━━━━━━━━━━━━━━━  │ │ │
 │  │                 │      │   │ • Type conversions     │ │ │
 │  │  db.search(...) │      │   │ • Async handling       │ │ │
 │  │                 │      │   │ • Error mapping        │ │ │
@@ -125,7 +125,7 @@ If you prefer TypeScript, type definitions are available via `@types/ndb-node` o
 │                           │   ┌──────────┴──────────┐     │
 │                           │   ▼                     ▼     │
 │                           │ ┌────────────┐    ┌─────────┐ │
-│                           │ │ ndb crate  │    │  std    │ │
+│                           │ │ nVDB crate  │    │  std    │ │
 │                           │ │ ━━━━━━━━━  │    │  libs   │ │
 │                           │ │ • Database │    │         │ │
 │                           │ │ • Search   │    │         │ │
@@ -148,7 +148,7 @@ If you prefer TypeScript, type definitions are available via `@types/ndb-node` o
 ### Project Structure
 
 ```
-ndb-node/
+nvdb-node/
 ├── Cargo.toml              # Rust dependencies
 ├── package.json            # Node.js package
 ├── build.rs                # Build configuration
@@ -167,8 +167,8 @@ ndb-node/
 npm install -g @napi-rs/cli
 
 # Create new project
-napi new ndb-node
-cd ndb-node
+napi new nvdb-node
+cd nvdb-node
 
 # Install dependencies
 npm install
@@ -178,7 +178,7 @@ npm install
 
 ```toml
 [package]
-name = "ndb-node"
+name = "nvdb-node"
 version = "0.1.0"
 edition = "2021"
 
@@ -190,8 +190,8 @@ crate-type = ["cdylib"]
 napi = { version = "2.14", default-features = false, features = ["napi8", "async"] }
 napi-derive = "2.14"
 
-# nDB dependency (path or git)
-ndb = { path = "../ndb" }
+# nVDB dependency (path or git)
+nVDB = { path = "../nVDB" }
 
 # Async runtime for Node.js integration
 tokio = { version = "1.35", features = ["rt-multi-thread"] }
@@ -212,7 +212,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 
-use ndb::{
+use nVDB::{
     Database, CollectionConfig, Collection, Document, 
     Search, Distance, Filter, Durability
 };
@@ -222,12 +222,12 @@ use ndb::{
 // ============================================================================
 
 #[napi]
-pub struct NDB {
+pub struct nVDB {
     inner: Arc<Database>,
 }
 
 #[napi]
-impl NDB {
+impl nVDB {
     #[napi(constructor)]
     pub fn new(path: String) -> Result<Self> {
         let db = Database::open(&path)
@@ -560,19 +560,19 @@ fn parse_filter_value(value: &serde_json::Value) -> Option<Filter> {
     None
 }
 
-fn json_to_filter_value(value: &serde_json::Value) -> Option<ndb::filter::FilterValue> {
+fn json_to_filter_value(value: &serde_json::Value) -> Option<nVDB::filter::FilterValue> {
     match value {
-        serde_json::Value::String(s) => Some(ndb::filter::FilterValue::String(s.clone())),
+        serde_json::Value::String(s) => Some(nVDB::filter::FilterValue::String(s.clone())),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Some(ndb::filter::FilterValue::Int(i))
+                Some(nVDB::filter::FilterValue::Int(i))
             } else if let Some(f) = n.as_f64() {
-                Some(ndb::filter::FilterValue::Float(f))
+                Some(nVDB::filter::FilterValue::Float(f))
             } else {
                 None
             }
         }
-        serde_json::Value::Bool(b) => Some(ndb::filter::FilterValue::Bool(*b)),
+        serde_json::Value::Bool(b) => Some(nVDB::filter::FilterValue::Bool(*b)),
         _ => None,
     }
 }
@@ -639,7 +639,7 @@ export class NDBCollection {
   sync(): void;
 }
 
-export class NDB {
+export class nVDB {
   constructor(path: string);
   
   createCollection(
@@ -659,7 +659,7 @@ The native addon exposes low-level bindings. This wrapper provides a cleaner Jav
 
 ```javascript
 // index.js - Plain JavaScript with JSDoc for IntelliSense
-const { NDB, NDBCollection } = require('./ndb.node');
+const { nVDB, NDBCollection } = require('./nVDB.node');
 
 /**
  * @typedef {Object} Document
@@ -679,12 +679,12 @@ const { NDB, NDBCollection } = require('./ndb.node');
  */
 
 /**
- * Vector Database wrapper for nDB.
+ * Vector Database wrapper for nVDB.
  * Works with plain JavaScript - no TypeScript required.
  */
 class Database {
   constructor(path) {
-    this._db = new NDB(path);
+    this._db = new nVDB(path);
   }
 
   createCollection(name, dim, options = {}) {
@@ -749,7 +749,7 @@ class FilterBuilder {
 module.exports = {
   Database,
   FilterBuilder,
-  NDB,
+  nVDB,
   NDBCollection
 };
 ```
@@ -758,7 +758,7 @@ module.exports = {
 
 ```javascript
 // example.js
-const { Database, FilterBuilder } = require('ndb-node');
+const { Database, FilterBuilder } = require('nvdb-node');
 
 async function main() {
   // Open database
@@ -838,12 +838,12 @@ main().catch(console.error);
 ```json
 // package.json
 {
-  "name": "ndb-node",
+  "name": "nvdb-node",
   "version": "0.1.0",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "name": "ndb-node",
+    "name": "nvdb-node",
     "triples": {
       "additional": [
         "aarch64-apple-darwin",
@@ -897,12 +897,12 @@ Use WASM when you need browser compatibility or simpler deployment without nativ
 ```rust
 // Cargo.toml
 [package]
-name = "ndb-wasm"
+name = "nVDB-wasm"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-ndb = { path = "../ndb" }
+nVDB = { path = "../nVDB" }
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
@@ -911,7 +911,7 @@ js-sys = "0.3"
 ```rust
 // src/lib.rs
 use wasm_bindgen::prelude::*;
-use ndb::{Database, CollectionConfig, Document, Search, Distance};
+use nVDB::{Database, CollectionConfig, Document, Search, Distance};
 
 #[wasm_bindgen]
 pub struct WasmDB {
@@ -962,10 +962,10 @@ async function main() {
 Use a gRPC service when you need multi-language support or distributed access.
 
 ```proto
-// ndb.proto
+// nVDB.proto
 syntax = "proto3";
 
-package ndb;
+package nVDB;
 
 service NDBService {
   rpc Search(SearchRequest) returns (SearchResponse);
@@ -996,8 +996,8 @@ message Match {
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 
-const packageDefinition = protoLoader.loadSync('ndb.proto');
-const ndbProto = grpc.loadPackageDefinition(packageDefinition).ndb;
+const packageDefinition = protoLoader.loadSync('nVDB.proto');
+const ndbProto = grpc.loadPackageDefinition(packageDefinition).nVDB;
 
 const client = new ndbProto.NDBService(
   'localhost:50051',
@@ -1033,13 +1033,13 @@ client.search({
 
 ## TypeScript Support (Optional)
 
-While nDB Node.js bindings are written in plain JavaScript, **TypeScript definitions are provided** for teams that use TypeScript. You don't need TypeScript to use nDB—everything works with plain JS.
+While nVDB Node.js bindings are written in plain JavaScript, **TypeScript definitions are provided** for teams that use TypeScript. You don't need TypeScript to use nVDB—everything works with plain JS.
 
 ### Installing Type Definitions
 
 ```bash
 # TypeScript users
-npm install --save-dev @types/ndb-node
+npm install --save-dev @types/nvdb-node
 
 # Plain JavaScript - no install needed, JSDoc provides IntelliSense
 ```
@@ -1052,9 +1052,9 @@ Even without TypeScript, you can get full autocomplete and type checking in VS C
 // @ts-check directive enables type checking in plain JS files
 // @ts-check
 
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
-/** @type {import('ndb-node').Database} */
+/** @type {import('nvdb-node').Database} */
 const db = new Database('./data');
 
 // Now you get autocomplete for all Database methods
@@ -1075,8 +1075,8 @@ Or add to your `jsconfig.json`:
 ### Full Type Definitions
 
 ```typescript
-// types/ndb.d.ts - For TypeScript users
-declare module 'ndb-node' {
+// types/nVDB.d.ts - For TypeScript users
+declare module 'nvdb-node' {
   export type DistanceMetric = 'cosine' | 'dot' | 'euclidean';
   export type Durability = 'buffered' | 'sync';
 
@@ -1166,7 +1166,7 @@ declare module 'ndb-node' {
 ### NPM Package Structure
 
 ```
-ndb-node/
+nvdb-node/
 ├── package.json
 ├── index.js              # Main entry
 ├── index.d.ts            # TypeScript types
@@ -1174,15 +1174,15 @@ ndb-node/
 ├── LICENSE
 └── npm/
     ├── darwin-arm64/
-    │   └── ndb-node.node
+    │   └── nvdb-node.node
     ├── darwin-x64/
-    │   └── ndb-node.node
+    │   └── nvdb-node.node
     ├── linux-arm64-gnu/
-    │   └── ndb-node.node
+    │   └── nvdb-node.node
     ├── linux-x64-gnu/
-    │   └── ndb-node.node
+    │   └── nvdb-node.node
     └── win32-x64-msvc/
-        └── ndb-node.node
+        └── nvdb-node.node
 ```
 
 ### GitHub Actions for CI/CD
@@ -1257,7 +1257,7 @@ jobs:
 ### 1. Connection Pooling
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
 // Create database once, reuse across requests
 const db = new Database(process.env.NDB_DATA_DIR);
@@ -1303,7 +1303,7 @@ setInterval(() => {
 ### 4. Error Handling
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
 class NDBClient {
   constructor(path) {
@@ -1363,14 +1363,14 @@ class AsyncCollection {
 ### Issue: Module not found
 
 ```bash
-# Error: Cannot find module './ndb.node'
+# Error: Cannot find module './nVDB.node'
 
 # Solution: Rebuild for your platform
 npm install
 npm run build
 
 # Or use prebuilt binaries
-npm install ndb-node --target_arch=x64 --target_platform=linux
+npm install nvdb-node --target_arch=x64 --target_platform=linux
 ```
 
 ### Issue: Collection locked
@@ -1452,4 +1452,4 @@ collection.deleteIndex();
 
 ---
 
-*For more information, see the [nDB documentation](https://github.com/ndb/ndb) or file an issue.*
+*For more information, see the [nVDB documentation](https://github.com/nvdb/nvdb) or file an issue.*

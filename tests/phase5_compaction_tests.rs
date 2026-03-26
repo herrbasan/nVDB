@@ -6,7 +6,7 @@
 //! - Crash recovery
 //! - Query correctness after compaction
 
-use ndb::{CollectionConfig, Database, Document, Search};
+use nvdb::{CollectionConfig, Database, Document, Search};
 use tempfile::TempDir;
 
 fn create_test_doc(id: &str, dim: usize) -> Document {
@@ -300,7 +300,7 @@ fn test_compaction_rebuilds_index() {
     coll.flush().unwrap();
 
     // Build HNSW index
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     assert!(coll.has_index());
 
     // Delete some documents
@@ -391,7 +391,7 @@ fn test_compaction_orphan_cleanup() {
 
     // Create fake temp files (simulating interrupted compaction)
     let segments_dir = temp_dir.path().join("test").join("segments");
-    std::fs::write(segments_dir.join("orphan.ndb.tmp"), b"fake data").unwrap();
+    std::fs::write(segments_dir.join("orphan.nvdb.tmp"), b"fake data").unwrap();
     std::fs::write(
         temp_dir.path().join("test").join("index.hnsw.tmp"),
         b"fake index",
@@ -399,7 +399,7 @@ fn test_compaction_orphan_cleanup() {
     .unwrap();
 
     // Verify temp files exist
-    assert!(segments_dir.join("orphan.ndb.tmp").exists());
+    assert!(segments_dir.join("orphan.nvdb.tmp").exists());
 
     // Drop collection and reopen (should clean up orphans)
     drop(coll);
@@ -409,7 +409,7 @@ fn test_compaction_orphan_cleanup() {
     let _coll2 = db2.get_collection("test").unwrap();
 
     // Orphan files should be cleaned up
-    assert!(!segments_dir.join("orphan.ndb.tmp").exists());
+    assert!(!segments_dir.join("orphan.nvdb.tmp").exists());
 }
 
 #[test]

@@ -1,6 +1,6 @@
-# nDB Examples
+# nVDB Examples
 
-This directory contains example applications demonstrating various nDB integration patterns.
+This directory contains example applications demonstrating various nVDB integration patterns.
 
 ## Available Examples
 
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Resource Cleanup
 
-nDB uses RAII - resources are cleaned up automatically when values go out of scope:
+nVDB uses RAII - resources are cleaned up automatically when values go out of scope:
 
 ```rust
 {

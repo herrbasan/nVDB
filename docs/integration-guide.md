@@ -1,4 +1,4 @@
-# nDB Integration Guide
+# nVDB Integration Guide
 
 > **Version:** 0.1.0  
 > **Last Updated:** 2026-02-14
@@ -22,9 +22,9 @@
 
 ## Overview
 
-nDB is designed as an embedded vector database for applications requiring high-performance similarity search. This guide covers integration patterns for various architectures and platforms.
+nVDB is designed as an embedded vector database for applications requiring high-performance similarity search. This guide covers integration patterns for various architectures and platforms.
 
-### When to Integrate nDB
+### When to Integrate nVDB
 
 - **RAG Systems**: Store and retrieve document embeddings for LLM context
 - **Recommendation Engines**: Find similar items based on vector similarity
@@ -37,7 +37,7 @@ nDB is designed as an embedded vector database for applications requiring high-p
 ```
 ┌─ Your Application ────────────────┐
 │                                     │
-│  Business Logic ←→ nDB (embedded) │
+│  Business Logic ←→ nVDB (embedded) │
 │                                     │
 └─────────────────┬───────────────────┘
                   │
@@ -53,16 +53,16 @@ nDB is designed as an embedded vector database for applications requiring high-p
 
 ### Pattern 1: Direct Rust Integration
 
-For Rust applications, nDB is embedded directly as a library.
+For Rust applications, nVDB is embedded directly as a library.
 
 ```rust
 // Cargo.toml
 [dependencies]
-ndb = "0.1"
+nVDB = "0.1"
 serde_json = "1.0"
 
 // src/main.rs
-use ndb::{Database, CollectionConfig, Document, Search};
+use nVDB::{Database, CollectionConfig, Document, Search};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Database is embedded in your application
@@ -79,11 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Pattern 2: Embedded in a Service
 
-Wrap nDB in a service layer for multi-threaded access:
+Wrap nVDB in a service layer for multi-threaded access:
 
 ```rust
 use std::sync::Arc;
-use ndb::{Database, Collection};
+use nVDB::{Database, Collection};
 
 pub struct VectorService {
     db: Arc<Database>,
@@ -100,7 +100,7 @@ impl VectorService {
         collection: &str,
         query: &[f32],
         top_k: usize,
-    ) -> Result<Vec<Match>, ndb::Error> {
+    ) -> Result<Vec<Match>, nVDB::Error> {
         let coll = self.db.get_collection(collection)?;
         let search = Search::new(query).top_k(top_k);
         coll.search(&search)
@@ -168,7 +168,7 @@ impl IngestionPipeline {
 
 ### Pattern 4: Read Replicas (Single Writer, Multiple Readers)
 
-nDB supports multiple processes reading while one writes:
+nVDB supports multiple processes reading while one writes:
 
 ```rust
 // Writer process
@@ -211,7 +211,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Add to Cargo.toml
 [dependencies]
-ndb = "0.1"
+nVDB = "0.1"
 
 # Build
  cargo build --release
@@ -291,7 +291,7 @@ Create a Python wrapper using PyO3:
 ```rust
 // src/lib.rs (Python module)
 use pyo3::prelude::*;
-use ndb::{Database, CollectionConfig, Document, Search};
+use nVDB::{Database, CollectionConfig, Document, Search};
 
 #[pyclass]
 struct PyDatabase {
@@ -344,7 +344,7 @@ from setuptools import setup
 from setuptools_rust import Binding, RustExtension
 
 setup(
-    name="ndb-py",
+    name="nVDB-py",
     version="0.1.0",
     rust_extensions=[RustExtension("ndb_py", binding=Binding.PyO3)],
     packages=["ndb_py"],
@@ -367,15 +367,15 @@ for r in results:
 ```rust
 // Native module using napi-rs
 use napi_derive::napi;
-use ndb::{Database, Search};
+use nVDB::{Database, Search};
 
 #[napi]
-pub struct NDB {
+pub struct nVDB {
     db: Database,
 }
 
 #[napi]
-impl NDB {
+impl nVDB {
     #[napi(constructor)]
     pub fn new(path: String) -> napi::Result<Self> {
         Ok(Self {
@@ -415,9 +415,9 @@ pub struct Match {
 
 ```javascript
 // usage.js
-const { NDB } = require('./index.node');
+const { nVDB } = require('./index.node');
 
-const db = new NDB('./data');
+const db = new nVDB('./data');
 const results = db.search('embeddings', new Array(768).fill(0.1), 10);
 console.log(results);
 ```
@@ -425,8 +425,8 @@ console.log(results);
 ### Go (via CGO)
 
 ```go
-// ndb.go
-package ndb
+// nVDB.go
+package nVDB
 
 /*
 #cgo LDFLAGS: -L. -lndb_c
@@ -503,7 +503,7 @@ impl Config {
 ### YAML Configuration
 
 ```yaml
-# ndb.yaml
+# nVDB.yaml
 data_dir: ./data
 default_dim: 768
 durability: buffered  # or "sync"
@@ -548,7 +548,7 @@ impl Default for DurabilityConfig {
 }
 
 // Load
-let config: AppConfig = serde_yaml::from_str(&std::fs::read_to_string("ndb.yaml")?)?;
+let config: AppConfig = serde_yaml::from_str(&std::fs::read_to_string("nVDB.yaml")?)?;
 ```
 
 ---
@@ -558,7 +558,7 @@ let config: AppConfig = serde_yaml::from_str(&std::fs::read_to_string("ndb.yaml"
 ### Use Case 1: RAG (Retrieval-Augmented Generation)
 
 ```rust
-use ndb::{Database, CollectionConfig, Document, Search, Filter};
+use nVDB::{Database, CollectionConfig, Document, Search, Filter};
 
 pub struct RAGSystem {
     db: Database,
@@ -585,7 +585,7 @@ impl RAGSystem {
         doc_id: &str,
         text: &str,
         metadata: serde_json::Value,
-    ) -> Result<(), ndb::Error> {
+    ) -> Result<(), nVDB::Error> {
         // Generate embedding (using your preferred model)
         let embedding = generate_embedding(text);
         
@@ -604,7 +604,7 @@ impl RAGSystem {
         query: &str,
         top_k: usize,
         source_filter: Option<&str>,
-    ) -> Result<Vec<ContextChunk>, ndb::Error> {
+    ) -> Result<Vec<ContextChunk>, nVDB::Error> {
         let query_embedding = generate_embedding(query);
         
         let coll = self.db.get_collection("documents")?;
@@ -724,7 +724,7 @@ impl RecommendationEngine {
         embedding: Vec<f32>,
         category: &str,
         price_range: &str,
-    ) -> Result<(), ndb::Error> {
+    ) -> Result<(), nVDB::Error> {
         let coll = self.db.get_collection("items")?;
         coll.insert(Document {
             id: item_id.to_string(),
@@ -743,7 +743,7 @@ impl RecommendationEngine {
         category: Option<&str>,
         max_price: Option<f64>,
         n: usize,
-    ) -> Result<Vec<Recommendation>, ndb::Error> {
+    ) -> Result<Vec<Recommendation>, nVDB::Error> {
         let coll = self.db.get_collection("items")?;
         
         // Build filter
@@ -790,7 +790,7 @@ services:
   app:
     build: .
     volumes:
-      - ndb-data:/data
+      - nVDB-data:/data
     environment:
       - NDB_DATA_DIR=/data
       - NDB_DURABILITY=sync
@@ -800,7 +800,7 @@ services:
           memory: 8G
 
 volumes:
-  ndb-data:
+  nVDB-data:
 ```
 
 ### Kubernetes StatefulSet
@@ -813,7 +813,7 @@ metadata:
   name: vector-service
 spec:
   serviceName: vector-service
-  replicas: 1  # nDB is single-writer
+  replicas: 1  # nVDB is single-writer
   selector:
     matchLabels:
       app: vector-service
@@ -939,7 +939,7 @@ coll.rebuild_index()?;
 use memmap2::MmapOptions;
 
 // For read-heavy workloads, prefetch can help
-// (nDB does this automatically for segments)
+// (nVDB does this automatically for segments)
 ```
 
 ### Connection Pooling
@@ -954,14 +954,14 @@ struct NDBManager {
 #[async_trait::async_trait]
 impl Manager for NDBManager {
     type Type = Collection;
-    type Error = ndb::Error;
+    type Error = nVDB::Error;
     
-    async fn create(&self) -> Result<Collection, ndb::Error> {
+    async fn create(&self) -> Result<Collection, nVDB::Error> {
         let db = Database::open(&self.db_path)?;
         db.get_collection("default")
     }
     
-    async fn recycle(&self, _: &mut Collection) -> deadpool::managed::RecycleResult<ndb::Error> {
+    async fn recycle(&self, _: &mut Collection) -> deadpool::managed::RecycleResult<nVDB::Error> {
         Ok(())
     }
 }
@@ -1038,7 +1038,7 @@ use tracing::{info, span, Level};
 pub fn search_with_tracing(
     coll: &Collection,
     query: &[f32],
-) -> Result<Vec<Match>, ndb::Error> {
+) -> Result<Vec<Match>, nVDB::Error> {
     let span = span!(Level::INFO, "search", query_len = query.len());
     let _enter = span.enter();
     
@@ -1127,7 +1127,7 @@ println!("Segments: {}, Docs: {}", stats.segment_count, stats.doc_count);
 **Symptoms:** Error opening database after power loss
 
 **Solutions:**
-1. nDB automatically truncates corrupt WAL records
+1. nVDB automatically truncates corrupt WAL records
 2. Check filesystem integrity: `fsck` (Linux) or `chkdsk` (Windows)
 3. Restore from backup if segments are corrupted
 
@@ -1164,7 +1164,7 @@ index = faiss.read_index("index.faiss")
 vectors = index.reconstruct_n(0, index.ntotal)
 np.save("vectors.npy", vectors)
 
-// Import to nDB
+// Import to nVDB
 let vectors: Vec<Vec<f32>> = read_npy("vectors.npy");
 for (i, vec) in vectors.iter().enumerate() {
     coll.insert(Document {
@@ -1181,7 +1181,7 @@ for (i, vec) in vectors.iter().enumerate() {
 // Export from ChromaDB
 let chroma_docs = chroma_collection.get();
 
-// Import to nDB
+// Import to nVDB
 for doc in chroma_docs {
     coll.insert(Document {
         id: doc.id,
@@ -1212,4 +1212,4 @@ for doc in chroma_docs {
 
 ---
 
-*For additional support, see the [GitHub repository](https://github.com/ndb/ndb) or file an issue.*
+*For additional support, see the [GitHub repository](https://github.com/nvdb/nvdb) or file an issue.*

@@ -1,4 +1,4 @@
-# nDB N-API Integration (Node.js Native)
+# nVDB N-API Integration (Node.js Native)
 
 > **Full native performance for Node.js applications**  
 > **Version:** 0.1.0  
@@ -8,7 +8,7 @@
 
 ## Overview
 
-The N-API integration provides **native-speed** access to nDB from Node.js. This is the most efficient approach when you need maximum performance and can use native modules.
+The N-API integration provides **native-speed** access to nVDB from Node.js. This is the most efficient approach when you need maximum performance and can use native modules.
 
 ### When to Use N-API
 
@@ -35,10 +35,10 @@ The N-API integration provides **native-speed** access to nDB from Node.js. This
 ┌─────────────────────────────────────────────────────────────┐
 │                    Node.js Process                          │
 │  ┌─────────────────┐      ┌──────────────────────────────┐ │
-│  │   Your JS Code  │◄────►│   ndb.node (N-API addon)     │ │
+│  │   Your JS Code  │◄────►│   nVDB.node (N-API addon)     │ │
 │  │                 │      │   ┌────────────────────────┐ │ │
 │  │  const db =     │      │   │ napi-rs bindings       │ │ │
-│  │    new NDB()    │      │   │ • Type conversions     │ │ │
+│  │    new nVDB()    │      │   │ • Type conversions     │ │ │
 │  │                 │      │   │ • Error mapping        │ │ │
 │  │  db.search(...) │      │   │ • Buffer handling      │ │ │
 │  │                 │      │   └────────────────────────┘ │ │
@@ -46,7 +46,7 @@ The N-API integration provides **native-speed** access to nDB from Node.js. This
 │                           │   ┌──────────┴──────────┐    │ │
 │                           │   ▼                     ▼    │ │
 │                           │ ┌────────────┐    ┌─────────┐│ │
-│                           │ │ ndb crate  │    │  std    ││ │
+│                           │ │ nVDB crate  │    │  std    ││ │
 │                           │ │ • Database │    │  libs   ││ │
 │                           │ │ • Search   │    │         ││ │
 │                           │ │ • HNSW     │    │         ││ │
@@ -70,7 +70,7 @@ The N-API integration provides **native-speed** access to nDB from Node.js. This
 ## Installation
 
 ```bash
-npm install ndb-node
+npm install nvdb-node
 ```
 
 Prebuilt binaries are automatically downloaded for your platform. If a prebuilt binary isn't available, it will compile from source (requires Rust toolchain).
@@ -89,7 +89,7 @@ Prebuilt binaries are automatically downloaded for your platform. If a prebuilt 
 ## Quick Start
 
 ```javascript
-const { Database, FilterBuilder } = require('ndb-node');
+const { Database, FilterBuilder } = require('nvdb-node');
 
 // Open or create database
 const db = new Database('./data');
@@ -130,7 +130,7 @@ console.log(results);
 ### Database
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
 // Open or create database at path
 const db = new Database('./data');
@@ -218,7 +218,7 @@ console.log(collection.config);    // { dim: 768, durability: 'sync' }
 ### FilterBuilder
 
 ```javascript
-const { FilterBuilder } = require('ndb-node');
+const { FilterBuilder } = require('nvdb-node');
 
 // Equality
 FilterBuilder.eq('status', 'active')
@@ -255,7 +255,7 @@ FilterBuilder.or(
 ### RAG (Retrieval-Augmented Generation)
 
 ```javascript
-const { Database, FilterBuilder } = require('ndb-node');
+const { Database, FilterBuilder } = require('nvdb-node');
 
 class VectorStore {
   constructor(dataDir = './data') {
@@ -310,7 +310,7 @@ const results = store.searchSimilar('documents', queryVector, {
 
 ```javascript
 const express = require('express');
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
 const app = express();
 app.use(express.json());
@@ -357,7 +357,7 @@ app.listen(3000, () => {
 ### Bulk Import Script
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 const fs = require('fs');
 const readline = require('readline');
 
@@ -482,14 +482,14 @@ const accurateResults = collection.search({
 
 ## Troubleshooting
 
-### "Cannot find module './ndb.node'"
+### "Cannot find module './nVDB.node'"
 
 ```bash
 # Binary not available for your platform - rebuild
-npm rebuild ndb-node
+npm rebuild nvdb-node
 
 # Or force compile
-npm install ndb-node --build-from-source
+npm install nvdb-node --build-from-source
 ```
 
 ### "CollectionLocked" Error
@@ -563,11 +563,11 @@ sudo apt-get install build-essential python3
 npm install --global windows-build-tools
 
 # Build from source
-npm install ndb-node --build-from-source
+npm install nvdb-node --build-from-source
 ```
 
 ---
 
 ## License
 
-MIT OR Apache-2.0 (same as nDB)
+MIT OR Apache-2.0 (same as nVDB)

@@ -103,7 +103,7 @@ pub fn write_segment_temp(
     }
     
     // Generate temp filename
-    let temp_filename = format!("{:04}.ndb.tmp", 1);
+    let temp_filename = format!("{:04}.nvdb.tmp", 1);
     let temp_path = segments_dir.join(&temp_filename);
     
     // Build segment
@@ -234,7 +234,7 @@ pub fn compact_with_deleted_ids(
     let old_filenames: Vec<String> = manifest.segment_filenames();
     
     // Rename temp segment to final name
-    let final_segment_filename = format!("{:04}.ndb", 1);
+    let final_segment_filename = format!("{:04}.nvdb", 1);
     let final_segment_path = segments_dir.join(&final_segment_filename);
     std::fs::rename(&temp_segment_path, &final_segment_path)
         .map_err(Error::io_err(&final_segment_path, "failed to rename segment file"))?;
@@ -290,7 +290,7 @@ pub fn cleanup_temp_files(collection_path: &Path) -> Result<usize> {
             if let Some(ext) = path.extension() {
                 if ext == "tmp" {
                     if let Some(name) = path.file_stem() {
-                        if name.to_string_lossy().ends_with(".ndb") {
+                        if name.to_string_lossy().ends_with(".nvdb") {
                             let _ = std::fs::remove_file(&path);
                             cleaned += 1;
                         }
@@ -351,7 +351,7 @@ mod tests {
         let dim = 4;
         
         // Create segment 1 with docs 1, 2
-        let path1 = temp_dir.path().join("0001.ndb");
+        let path1 = temp_dir.path().join("0001.nvdb");
         let seg1 = create_test_segment(
             &path1,
             &[
@@ -361,7 +361,7 @@ mod tests {
         );
         
         // Create segment 2 with docs 3, 4
-        let path2 = temp_dir.path().join("0002.ndb");
+        let path2 = temp_dir.path().join("0002.nvdb");
         let seg2 = create_test_segment(
             &path2,
             &[
@@ -389,7 +389,7 @@ mod tests {
         let dim = 4;
         
         // Create segment with docs
-        let path = temp_dir.path().join("0001.ndb");
+        let path = temp_dir.path().join("0001.nvdb");
         let seg = create_test_segment(
             &path,
             &[
@@ -418,13 +418,13 @@ mod tests {
         let dim = 4;
         
         // Create segment 1 with doc1 (old version)
-        let path1 = temp_dir.path().join("0001.ndb");
+        let path1 = temp_dir.path().join("0001.nvdb");
         let mut old_doc = create_test_doc("doc1", dim);
         old_doc.vector = vec![1.0, 1.0, 1.0, 1.0];
         let seg1 = create_test_segment(&path1, &[old_doc]);
         
         // Create segment 2 with doc1 (new version)
-        let path2 = temp_dir.path().join("0002.ndb");
+        let path2 = temp_dir.path().join("0002.nvdb");
         let mut new_doc = create_test_doc("doc1", dim);
         new_doc.vector = vec![2.0, 2.0, 2.0, 2.0];
         let seg2 = create_test_segment(&path2, &[new_doc]);
@@ -447,25 +447,25 @@ mod tests {
         std::fs::create_dir(&segments_dir).unwrap();
         
         // Create some temp files
-        std::fs::write(segments_dir.join("0001.ndb.tmp"), b"temp").unwrap();
-        std::fs::write(segments_dir.join("0002.ndb.tmp"), b"temp").unwrap();
+        std::fs::write(segments_dir.join("0001.nvdb.tmp"), b"temp").unwrap();
+        std::fs::write(segments_dir.join("0002.nvdb.tmp"), b"temp").unwrap();
         std::fs::write(temp_dir.path().join("index.hnsw.tmp"), b"temp").unwrap();
         std::fs::write(temp_dir.path().join("MANIFEST.tmp"), b"temp").unwrap();
         
         // Create a non-temp file that should NOT be deleted
-        std::fs::write(segments_dir.join("0001.ndb"), b"real").unwrap();
+        std::fs::write(segments_dir.join("0001.nvdb"), b"real").unwrap();
         
         let cleaned = cleanup_temp_files(temp_dir.path()).unwrap();
         assert_eq!(cleaned, 4);
         
         // Verify temp files are gone
-        assert!(!segments_dir.join("0001.ndb.tmp").exists());
-        assert!(!segments_dir.join("0002.ndb.tmp").exists());
+        assert!(!segments_dir.join("0001.nvdb.tmp").exists());
+        assert!(!segments_dir.join("0002.nvdb.tmp").exists());
         assert!(!temp_dir.path().join("index.hnsw.tmp").exists());
         assert!(!temp_dir.path().join("MANIFEST.tmp").exists());
         
         // Verify real file remains
-        assert!(segments_dir.join("0001.ndb").exists());
+        assert!(segments_dir.join("0001.nvdb").exists());
     }
 
     #[test]

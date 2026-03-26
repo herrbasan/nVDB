@@ -3,7 +3,7 @@
 //! Created: 2026-02-14 17:16:48+01:00
 //! Phase: 1A — File Format, Mmap & Validation
 
-use ndb::lock::{is_locked, CollectionLock};
+use nvdb::lock::{is_locked, CollectionLock};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;

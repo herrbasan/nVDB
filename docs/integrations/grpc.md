@@ -1,4 +1,4 @@
-# nDB gRPC Integration
+# nVDB gRPC Integration
 
 > **Optional standalone service** - wraps the embedded library with a network interface
 > **Version:** 0.1.0
@@ -8,11 +8,11 @@
 
 ## Overview
 
-nDB is designed as an **embedded library** - the core library runs in-process with your application. The gRPC integration is an **optional wrapper** that exposes nDB over a network when you need a client-server architecture.
+nVDB is designed as an **embedded library** - the core library runs in-process with your application. The gRPC integration is an **optional wrapper** that exposes nVDB over a network when you need a client-server architecture.
 
 | Use Case | Recommended Approach |
 |----------|---------------------|
-| Embedded in your app | Use nDB directly (`ndb` crate) |
+| Embedded in your app | Use nVDB directly (`nVDB` crate) |
 | Python/Go/other languages | gRPC service wrapper |
 | Multi-language team | gRPC service wrapper |
 | Microservices | gRPC service wrapper |
@@ -21,7 +21,7 @@ nDB is designed as an **embedded library** - the core library runs in-process wi
 
 | Scenario | Solution |
 |----------|----------|
-| **Python app needs nDB** | Run `ndb-grpc.exe`, connect via gRPC client |
+| **Python app needs nVDB** | Run `nVDB-grpc.exe`, connect via gRPC client |
 | **Multi-language team** | One binary, many clients |
 | **Separate database server** | Run on dedicated machine/container |
 | **Microservices** | Vector service independent of app logic |
@@ -31,9 +31,9 @@ nDB is designed as an **embedded library** - the core library runs in-process wi
 ```
 ┌─ Machine / Container ─────────────────────┐
 │  ┌─────────────────────────────────────┐  │
-│  │  ndb-grpc (standalone executable)   │  │
+│  │  nVDB-grpc (standalone executable)   │  │
 │  │                                      │  │
-│  │  gRPC Server :50051 ──▶ nDB Engine  │  │
+│  │  gRPC Server :50051 ──▶ nVDB Engine  │  │
 │  │                    (Collections,     │  │
 │  │                     HNSW, mmap)      │  │
 │  └─────────────────────────────────────┘  │
@@ -54,26 +54,26 @@ nDB is designed as an **embedded library** - the core library runs in-process wi
 
 ```bash
 # Linux x64
-curl -LO https://github.com/ndb/ndb/releases/latest/download/ndb-grpc-linux-x64.tar.gz
-tar xzf ndb-grpc-linux-x64.tar.gz
+curl -LO https://github.com/nvdb/nvdb/releases/latest/download/nVDB-grpc-linux-x64.tar.gz
+tar xzf nVDB-grpc-linux-x64.tar.gz
 
 # Windows x64 (PowerShell)
-Invoke-WebRequest https://github.com/ndb/ndb/releases/latest/download/ndb-grpc-windows-x64.zip -OutFile ndb-grpc.zip
-Expand-Archive ndb-grpc.zip -DestinationPath C:\ndb
+Invoke-WebRequest https://github.com/nvdb/nvdb/releases/latest/download/nVDB-grpc-windows-x64.zip -OutFile nVDB-grpc.zip
+Expand-Archive nVDB-grpc.zip -DestinationPath C:\nVDB
 
 # macOS (Apple Silicon)
-curl -LO https://github.com/ndb/ndb/releases/latest/download/ndb-grpc-macos-arm64.tar.gz
-tar xzf ndb-grpc-macos-arm64.tar.gz
+curl -LO https://github.com/nvdb/nvdb/releases/latest/download/nVDB-grpc-macos-arm64.tar.gz
+tar xzf nVDB-grpc-macos-arm64.tar.gz
 ```
 
 ### 2. Run the Server
 
 ```bash
 # Start with defaults (port 50051, data in ./data)
-./ndb-grpc
+./nVDB-grpc
 
 # Or specify options
-./ndb-grpc --data-dir /var/lib/ndb --port 50051
+./nVDB-grpc --data-dir /var/lib/nVDB --port 50051
 ```
 
 ### 3. Connect from Your Language
@@ -94,30 +94,30 @@ Download from GitHub releases:
 
 | Platform | Download |
 |----------|----------|
-| Linux x64 | `ndb-grpc-linux-x64.tar.gz` |
-| Linux ARM64 | `ndb-grpc-linux-arm64.tar.gz` |
-| Windows x64 | `ndb-grpc-windows-x64.zip` |
-| macOS x64 | `ndb-grpc-macos-x64.tar.gz` |
-| macOS ARM64 | `ndb-grpc-macos-arm64.tar.gz` |
+| Linux x64 | `nVDB-grpc-linux-x64.tar.gz` |
+| Linux ARM64 | `nVDB-grpc-linux-arm64.tar.gz` |
+| Windows x64 | `nVDB-grpc-windows-x64.zip` |
+| macOS x64 | `nVDB-grpc-macos-x64.tar.gz` |
+| macOS ARM64 | `nVDB-grpc-macos-arm64.tar.gz` |
 
 ```bash
 # Example: Linux install
-wget https://github.com/ndb/ndb/releases/latest/download/ndb-grpc-linux-x64.tar.gz
-tar xzf ndb-grpc-linux-x64.tar.gz
-sudo mv ndb-grpc /usr/local/bin/
-sudo chmod +x /usr/local/bin/ndb-grpc
+wget https://github.com/nvdb/nvdb/releases/latest/download/nVDB-grpc-linux-x64.tar.gz
+tar xzf nVDB-grpc-linux-x64.tar.gz
+sudo mv nVDB-grpc /usr/local/bin/
+sudo chmod +x /usr/local/bin/nVDB-grpc
 ```
 
 ### Option 2: Cargo Install
 
 ```bash
-cargo install ndb-grpc
+cargo install nVDB-grpc
 ```
 
 ### Option 3: Docker
 
 ```bash
-docker run -p 50051:50051 -v $(pwd)/data:/data ndb/ndb-grpc:latest
+docker run -p 50051:50051 -v $(pwd)/data:/data nVDB/nVDB-grpc:latest
 ```
 
 ---
@@ -127,7 +127,7 @@ docker run -p 50051:50051 -v $(pwd)/data:/data ndb/ndb-grpc:latest
 ### Basic Usage
 
 ```bash
-ndb-grpc [OPTIONS]
+nVDB-grpc [OPTIONS]
 ```
 
 ### Flags
@@ -146,19 +146,19 @@ ndb-grpc [OPTIONS]
 
 ```bash
 # Basic - local development
-ndb-grpc
+nVDB-grpc
 
 # Production - specific directories
-ndb-grpc --data-dir /var/lib/ndb --port 50051
+nVDB-grpc --data-dir /var/lib/nVDB --port 50051
 
 # Local only (no external access)
-ndb-grpc --host 127.0.0.1
+nVDB-grpc --host 127.0.0.1
 
 # With TLS
-ndb-grpc --tls-cert server.crt --tls-key server.key
+nVDB-grpc --tls-cert server.crt --tls-key server.key
 
 # Read replica (read-only access)
-ndb-grpc --data-dir /shared/ndb --read-only
+nVDB-grpc --data-dir /shared/nVDB --read-only
 ```
 
 ---
@@ -168,34 +168,34 @@ ndb-grpc --data-dir /shared/ndb --read-only
 ### Windows Service
 
 ```powershell
-# Download and extract to C:\ndb
+# Download and extract to C:\nVDB
 # Create data directory
-New-Item -ItemType Directory -Force -Path C:\ndb\data
+New-Item -ItemType Directory -Force -Path C:\nVDB\data
 
 # Install using nssm (https://nssm.cc/)
-nssm install nDB-GRPC C:\ndb\ndb-grpc.exe
-nssm set nDB-GRPC AppDirectory C:\ndb
-nssm set nDB-GRPC AppParameters --data-dir C:\ndb\data --host 127.0.0.1
-nssm start nDB-GRPC
+nssm install nVDB-GRPC C:\nVDB\nVDB-grpc.exe
+nssm set nVDB-GRPC AppDirectory C:\nVDB
+nssm set nVDB-GRPC AppParameters --data-dir C:\nVDB\data --host 127.0.0.1
+nssm start nVDB-GRPC
 
 # Check status
-nssm status nDB-GRPC
+nssm status nVDB-GRPC
 ```
 
 ### Linux systemd
 
 ```ini
-# /etc/systemd/system/ndb-grpc.service
+# /etc/systemd/system/nVDB-grpc.service
 [Unit]
-Description=nDB gRPC Vector Database
+Description=nVDB gRPC Vector Database
 After=network.target
 
 [Service]
 Type=simple
-User=ndb
-Group=ndb
-WorkingDirectory=/var/lib/ndb
-ExecStart=/usr/local/bin/ndb-grpc --data-dir /var/lib/ndb --port 50051
+User=nVDB
+Group=nVDB
+WorkingDirectory=/var/lib/nVDB
+ExecStart=/usr/local/bin/nVDB-grpc --data-dir /var/lib/nVDB --port 50051
 Restart=always
 RestartSec=5
 Environment="RUST_LOG=info"
@@ -206,37 +206,37 @@ WantedBy=multi-user.target
 
 ```bash
 # Setup
-sudo useradd -r -s /bin/false ndb
-sudo mkdir -p /var/lib/ndb
-sudo chown ndb:ndb /var/lib/ndb
-sudo cp ndb-grpc /usr/local/bin/
-sudo cp ndb-grpc.service /etc/systemd/system/
+sudo useradd -r -s /bin/false nVDB
+sudo mkdir -p /var/lib/nVDB
+sudo chown nVDB:nVDB /var/lib/nVDB
+sudo cp nVDB-grpc /usr/local/bin/
+sudo cp nVDB-grpc.service /etc/systemd/system/
 
 # Start
 sudo systemctl daemon-reload
-sudo systemctl enable ndb-grpc
-sudo systemctl start ndb-grpc
-sudo systemctl status ndb-grpc
+sudo systemctl enable nVDB-grpc
+sudo systemctl start nVDB-grpc
+sudo systemctl status nVDB-grpc
 
 # Logs
-sudo journalctl -u ndb-grpc -f
+sudo journalctl -u nVDB-grpc -f
 ```
 
 ### macOS LaunchAgent
 
 ```xml
-<!-- ~/Library/LaunchAgents/com.ndb.grpc.plist -->
+<!-- ~/Library/LaunchAgents/com.nVDB.grpc.plist -->
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ndb.grpc</string>
+    <string>com.nVDB.grpc</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/ndb-grpc</string>
+        <string>/usr/local/bin/nVDB-grpc</string>
         <string>--data-dir</string>
-        <string>/Users/yourname/ndb-data</string>
+        <string>/Users/yourname/nVDB-data</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -247,8 +247,8 @@ sudo journalctl -u ndb-grpc -f
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.ndb.grpc.plist
-launchctl start com.ndb.grpc
+launchctl load ~/Library/LaunchAgents/com.nVDB.grpc.plist
+launchctl start com.nVDB.grpc
 ```
 
 ---
@@ -257,11 +257,11 @@ launchctl start com.ndb.grpc
 
 ### Protocol Buffer Definition
 
-Save as `ndb.proto`:
+Save as `nVDB.proto`:
 
 ```protobuf
 syntax = "proto3";
-package ndb;
+package nVDB;
 
 service VectorService {
   rpc CreateCollection(CreateCollectionRequest) returns (Collection);
@@ -373,9 +373,9 @@ const protoLoader = require('@grpc/proto-loader');
 const path = require('path');
 
 // Load proto
-const PROTO_PATH = path.join(__dirname, 'ndb.proto');
+const PROTO_PATH = path.join(__dirname, 'nVDB.proto');
 const packageDef = protoLoader.loadSync(PROTO_PATH);
-const ndbProto = grpc.loadPackageDefinition(packageDef).ndb;
+const ndbProto = grpc.loadPackageDefinition(packageDef).nVDB;
 
 // Create client
 const client = new ndbProto.VectorService(
@@ -441,7 +441,7 @@ import ndb_pb2_grpc
 import json
 
 # Generate code from proto
-# python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. ndb.proto
+# python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. nVDB.proto
 
 # Connect
 channel = grpc.insecure_channel('localhost:50051')
@@ -491,7 +491,7 @@ import (
     "log"
     
     "google.golang.org/grpc"
-    pb "your-module/ndb"
+    pb "your-module/nVDB"
 )
 
 func main() {
@@ -536,11 +536,11 @@ func main() {
 
 ```bash
 docker run -d \
-  --name ndb-grpc \
+  --name nVDB-grpc \
   -p 50051:50051 \
   -v $(pwd)/data:/data \
   -e NDB_DATA_DIR=/data \
-  ndb/ndb-grpc:latest
+  nVDB/nVDB-grpc:latest
 ```
 
 ### Docker Compose
@@ -550,12 +550,12 @@ docker run -d \
 version: '3.8'
 
 services:
-  ndb:
-    image: ndb/ndb-grpc:latest
+  nVDB:
+    image: nVDB/nVDB-grpc:latest
     ports:
       - "50051:50051"
     volumes:
-      - ndb-data:/data
+      - nVDB-data:/data
     environment:
       - NDB_DATA_DIR=/data
       - NDB_HOST=0.0.0.0
@@ -563,7 +563,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  ndb-data:
+  nVDB-data:
 ```
 
 ```bash
@@ -578,20 +578,20 @@ docker-compose logs -f
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ndb-grpc
+  name: nVDB-grpc
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ndb-grpc
+      app: nVDB-grpc
   template:
     metadata:
       labels:
-        app: ndb-grpc
+        app: nVDB-grpc
     spec:
       containers:
-      - name: ndb
-        image: ndb/ndb-grpc:latest
+      - name: nVDB
+        image: nVDB/nVDB-grpc:latest
         ports:
         - containerPort: 50051
         volumeMounts:
@@ -603,15 +603,15 @@ spec:
       volumes:
       - name: data
         persistentVolumeClaim:
-          claimName: ndb-data
+          claimName: nVDB-data
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: ndb-grpc
+  name: nVDB-grpc
 spec:
   selector:
-    app: ndb-grpc
+    app: nVDB-grpc
   ports:
   - port: 50051
     targetPort: 50051
@@ -626,7 +626,7 @@ For scaling reads, run multiple instances with `--read-only`:
 ```
 ┌──────────────────────────────────────────┐
 │           Writer (Primary)               │
-│     ndb-grpc --data-dir /shared          │
+│     nVDB-grpc --data-dir /shared          │
 └──────────────────────────────────────────┘
                    │
          ┌─────────┴─────────┐
@@ -645,11 +645,11 @@ For scaling reads, run multiple instances with `--read-only`:
 
 ```bash
 # Primary (writes)
-ndb-grpc --data-dir /shared/ndb --port 50051
+nVDB-grpc --data-dir /shared/nVDB --port 50051
 
 # Readers (read-only)
-ndb-grpc --data-dir /shared/ndb --port 50052 --read-only
-ndb-grpc --data-dir /shared/ndb --port 50053 --read-only
+nVDB-grpc --data-dir /shared/nVDB --port 50052 --read-only
+nVDB-grpc --data-dir /shared/nVDB --port 50053 --read-only
 ```
 
 **Note:** Only one writer allowed. Writers use file locking to prevent corruption.
@@ -672,7 +672,7 @@ openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -out server.crt -days 
 ### Server with TLS
 
 ```bash
-ndb-grpc --tls-cert server.crt --tls-key server.key
+nVDB-grpc --tls-cert server.crt --tls-key server.key
 ```
 
 ### Client with TLS
@@ -699,24 +699,24 @@ grpcurl -plaintext localhost:50051 list
 nc -zv localhost 50051
 
 # Check logs
-journalctl -u ndb-grpc -f
+journalctl -u nVDB-grpc -f
 ```
 
 ### Permission Denied
 
 ```bash
 # Fix data directory permissions
-sudo chown -R $(whoami):$(whoami) /var/lib/ndb
+sudo chown -R $(whoami):$(whoami) /var/lib/nVDB
 ```
 
 ### High Memory Usage
 
 ```bash
 # Check collection stats
-grpcurl -plaintext localhost:50051 ndb.VectorService/GetStats
+grpcurl -plaintext localhost:50051 nVDB.VectorService/GetStats
 
 # Compact to reclaim space
-grpcurl -plaintext localhost:50051 ndb.VectorService/Compact
+grpcurl -plaintext localhost:50051 nVDB.VectorService/Compact
 ```
 
 ### Collection Locked
@@ -724,7 +724,7 @@ grpcurl -plaintext localhost:50051 ndb.VectorService/Compact
 ```bash
 # Another instance has the database open
 # Check for running processes
-lsof /var/lib/ndb/*/LOCK
+lsof /var/lib/nVDB/*/LOCK
 ```
 
 ---
@@ -735,13 +735,13 @@ If you need to compile the binary yourself:
 
 ```bash
 # Clone
-git clone https://github.com/ndb/ndb
-cd ndb/ndb-grpc
+git clone https://github.com/nvdb/nvdb
+cd nVDB/nVDB-grpc
 
 # Build release binary
 cargo build --release
 
-# Output: target/release/ndb-grpc
+# Output: target/release/nVDB-grpc
 ```
 
 ### Cross-Compile
@@ -758,4 +758,4 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 ## License
 
-MIT OR Apache-2.0 (same as nDB)
+MIT OR Apache-2.0 (same as nVDB)

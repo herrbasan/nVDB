@@ -293,7 +293,7 @@ mod tests {
         let config = CollectionConfig::new(768);
         let mut manifest = Manifest::new(config);
         manifest.add_segment(SegmentEntry {
-            filename: "0001.ndb".to_string(),
+            filename: "0001.nvdb".to_string(),
             doc_count: 100,
             id_range: (0, 100),
         });
@@ -304,7 +304,7 @@ mod tests {
         let loaded = Manifest::load(&manifest_path).unwrap().unwrap();
         assert_eq!(loaded.config.dim, 768);
         assert_eq!(loaded.segments.len(), 1);
-        assert_eq!(loaded.segments[0].filename, "0001.ndb");
+        assert_eq!(loaded.segments[0].filename, "0001.nvdb");
         assert_eq!(loaded.last_wal_seq, 42);
     }
 
@@ -324,7 +324,7 @@ mod tests {
         // Complete the update
         let mut manifest2 = Manifest::load(&manifest_path).unwrap().unwrap();
         manifest2.add_segment(SegmentEntry {
-            filename: "0002.ndb".to_string(),
+            filename: "0002.nvdb".to_string(),
             doc_count: 50,
             id_range: (100, 150),
         });
@@ -349,7 +349,7 @@ mod tests {
         manager
             .update(|m| {
                 m.add_segment(SegmentEntry {
-                    filename: "0001.ndb".to_string(),
+                    filename: "0001.nvdb".to_string(),
                     doc_count: 100,
                     id_range: (0, 100),
                 });
@@ -379,20 +379,20 @@ mod tests {
         let config = CollectionConfig::new(768);
         let mut manifest = Manifest::new(config);
         manifest.add_segment(SegmentEntry {
-            filename: "0001.ndb".to_string(),
+            filename: "0001.nvdb".to_string(),
             doc_count: 100,
             id_range: (0, 100),
         });
         manifest.add_segment(SegmentEntry {
-            filename: "0002.ndb".to_string(),
+            filename: "0002.nvdb".to_string(),
             doc_count: 50,
             id_range: (100, 150),
         });
 
-        manifest.remove_segments(&["0001.ndb".to_string()]);
+        manifest.remove_segments(&["0001.nvdb".to_string()]);
 
         assert_eq!(manifest.segments.len(), 1);
-        assert_eq!(manifest.segments[0].filename, "0002.ndb");
+        assert_eq!(manifest.segments[0].filename, "0002.nvdb");
     }
 
     #[test]
@@ -400,12 +400,12 @@ mod tests {
         let config = CollectionConfig::new(768);
         let mut manifest = Manifest::new(config);
         manifest.add_segment(SegmentEntry {
-            filename: "0001.ndb".to_string(),
+            filename: "0001.nvdb".to_string(),
             doc_count: 100,
             id_range: (0, 100),
         });
         manifest.add_segment(SegmentEntry {
-            filename: "0002.ndb".to_string(),
+            filename: "0002.nvdb".to_string(),
             doc_count: 50,
             id_range: (100, 150),
         });

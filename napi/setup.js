@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Setup script for nDB Node.js bindings (git submodule workflow)
+ * Setup script for nVDB Node.js bindings (git submodule workflow)
  * 
  * Usage: node setup.js
  * 
@@ -19,21 +19,21 @@ const arch = process.arch;
 // Platform-specific configurations
 const configs = {
   'win32': {
-    'x64': { source: '..\\target\\release\\ndb_node.dll', target: 'ndb-node.win32-x64-msvc.node' },
-    'arm64': { source: '..\\target\\release\\ndb_node.dll', target: 'ndb-node.win32-arm64-msvc.node' }
+    'x64': { source: '..\\target\\release\\nvdb_node.dll', target: 'nvdb-node.win32-x64-msvc.node' },
+    'arm64': { source: '..\\target\\release\\nvdb_node.dll', target: 'nvdb-node.win32-arm64-msvc.node' }
   },
   'darwin': {
-    'x64': { source: '../target/release/libndb_node.dylib', target: 'ndb-node.darwin-x64.node' },
-    'arm64': { source: '../target/release/libndb_node.dylib', target: 'ndb-node.darwin-arm64.node' }
+    'x64': { source: '../target/release/libnvdb_node.dylib', target: 'nvdb-node.darwin-x64.node' },
+    'arm64': { source: '../target/release/libnvdb_node.dylib', target: 'nvdb-node.darwin-arm64.node' }
   },
   'linux': {
-    'x64': { source: '../target/release/libndb_node.so', target: 'ndb-node.linux-x64-gnu.node' },
-    'arm64': { source: '../target/release/libndb_node.so', target: 'ndb-node.linux-arm64-gnu.node' }
+    'x64': { source: '../target/release/libnvdb_node.so', target: 'nvdb-node.linux-x64-gnu.node' },
+    'arm64': { source: '../target/release/libnvdb_node.so', target: 'nvdb-node.linux-arm64-gnu.node' }
   }
 };
 
 function main() {
-  console.log(`Setting up nDB Node.js bindings for ${platform}-${arch}...\n`);
+  console.log(`Setting up nVDB Node.js bindings for ${platform}-${arch}...\n`);
   
   const platformConfig = configs[platform];
   if (!platformConfig) {
@@ -53,7 +53,7 @@ function main() {
   // Step 1: Build the native module
   console.log('Step 1: Building native module...');
   try {
-    execSync('cargo build --release -p ndb-node', {
+    execSync('cargo build --release -p nvdb-node', {
       cwd: join(__dirname, '..'),
       stdio: 'inherit'
     });
@@ -101,8 +101,8 @@ function main() {
   }
   
   console.log('Setup complete!');
-  console.log('\nYou can now use nDB in your Node.js project:');
-  console.log(`  const { Database } = require('./ndb/napi');`);
+  console.log('\nYou can now use nVDB in your Node.js project:');
+  console.log(`  const { Database } = require('./nVDB/napi');`);
   console.log('\nOr run the example:');
   console.log(`  node examples/basic.js`);
 }

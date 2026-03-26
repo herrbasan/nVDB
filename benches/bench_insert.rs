@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize, BenchmarkId};
-use ndb::{Database, CollectionConfig};
+use nvdb::{Database, CollectionConfig};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -22,7 +22,7 @@ fn bench_insert_single(c: &mut Criterion) {
         let mut i = 0usize;
         b.iter(|| {
             let vec = generate_vector(128, i);
-            collection.insert(ndb::Document {
+            collection.insert(nvdb::Document {
                 id: format!("doc_{}", i),
                 vector: vec,
                 payload: Some(json!({"idx": i})),
@@ -55,7 +55,7 @@ fn bench_insert_batch(c: &mut Criterion) {
                         let collection = db.create_collection("test", config).unwrap();
                         
                         let docs: Vec<_> = (0..batch_size)
-                            .map(|i| ndb::Document {
+                            .map(|i| nvdb::Document {
                                 id: format!("doc_{}", i),
                                 vector: generate_vector(128, i),
                                 payload: Some(json!({"idx": i})),
@@ -89,7 +89,7 @@ fn bench_insert_throughput(c: &mut Criterion) {
         let collection = db.create_collection("test", config).unwrap();
         
         let docs: Vec<_> = (0..1000)
-            .map(|i| ndb::Document {
+            .map(|i| nvdb::Document {
                 id: format!("doc_{}", i),
                 vector: generate_vector(128, i),
                 payload: Some(json!({"idx": i})),
@@ -121,7 +121,7 @@ fn bench_insert_dimensions(c: &mut Criterion) {
             let mut i = 0usize;
             b.iter(|| {
                 let vec = generate_vector(dim, i);
-                collection.insert(ndb::Document {
+                collection.insert(nvdb::Document {
                     id: format!("doc_{}", i),
                     vector: vec,
                     payload: None,

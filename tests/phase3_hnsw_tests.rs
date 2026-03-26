@@ -6,7 +6,7 @@
 //! - Fallback to exact search
 //! - Recall vs exact search
 
-use ndb::{Database, CollectionConfig, Distance, Document, Search};
+use nvdb::{Database, CollectionConfig, Distance, Document, Search};
 use tempfile::TempDir;
 
 fn create_test_doc(id: &str, dim: usize) -> Document {
@@ -51,7 +51,7 @@ fn test_approximate_search_api() {
     coll.flush().unwrap();
     
     // Build HNSW index
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     
     // Test approximate search with builder
     let query = docs[0].vector.clone();
@@ -125,7 +125,7 @@ fn test_hnsw_persistence() {
         coll.flush().unwrap();
         
         // Build index
-        coll.rebuild_index().unwrap();
+        coll.rebuild_index(None, None).unwrap();
         assert!(coll.has_index(), "Collection should have index after rebuild");
     }
     
@@ -164,7 +164,7 @@ fn test_delete_index() {
     }
     coll.flush().unwrap();
     
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     assert!(coll.has_index(), "Should have index after rebuild");
     
     // Delete index
@@ -201,7 +201,7 @@ fn test_recall_vs_exact() {
     coll.flush().unwrap();
     
     // Build index
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     
     // Compare approximate vs exact for a few queries
     let mut matches = 0;
@@ -263,7 +263,7 @@ fn test_ef_parameter_effect() {
     }
     coll.flush().unwrap();
     
-    coll.rebuild_index().unwrap();
+    coll.rebuild_index(None, None).unwrap();
     
     let query = docs[0].vector.clone();
     

@@ -1,15 +1,15 @@
-# nDB Scope and Boundaries
+# nVDB Scope and Boundaries
 
-> **What nDB is, what it isn't, and why**
+> **What nVDB is, what it isn't, and why**
 
 ---
 
 ## Core Scope
 
-nDB is an **embedded library** - it runs in-process with your application, like SQLite for vectors. It does **one thing well**: **high-performance vector storage and similarity search**.
+nVDB is an **embedded library** - it runs in-process with your application, like SQLite for vectors. It does **one thing well**: **high-performance vector storage and similarity search**.
 
 ```
-Your App                          nDB
+Your App                          nVDB
 ┌──────────────┐    ┌───────────────────────┐
 │ Text/Data    │───▶│ Embedding Service     │──┐
 │ (your job)   │    │ (your job)            │  │
@@ -17,18 +17,18 @@ Your App                          nDB
                                                  ▼
                                          ┌───────────────────────┐
                                          │ Vector Storage/Search │
-                                         │ (nDB's job)           │
+                                         │ (nVDB's job)           │
                                          └───────────────────────┘
 ```
 
-### nDB Handles:
+### nVDB Handles:
 - ✅ Vector storage (memory-mapped, zero-copy)
 - ✅ Similarity search (exact & HNSW approximate)
 - ✅ Multi-collection management
 - ✅ Persistence and crash recovery
 - ✅ Embedded in your application (single writer, your app)
 
-### nDB Does NOT Handle:
+### nVDB Does NOT Handle:
 - ❌ Text embedding generation
 - ❌ Model management
 - ❌ Tokenization
@@ -63,7 +63,7 @@ Don't reinvent what already works:
 
 ### 3. Zero-Cost Abstractions
 
-Per nDB philosophy: **"Pay only for what you use"**.
+Per nVDB philosophy: **"Pay only for what you use"**.
 
 Embedding integration would add:
 - 100MB-2GB of model files (optional but confusing)
@@ -71,7 +71,7 @@ Embedding integration would add:
 - Configuration complexity (API keys, rate limits)
 - Version management (model updates)
 
-**Current nDB binary: ~5MB**  
+**Current nVDB binary: ~5MB**  
 **With embedding models: 500MB-2GB**
 
 ---
@@ -81,7 +81,7 @@ Embedding integration would add:
 ### Pattern 1: Cloud API (OpenAI, etc.)
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 const OpenAI = require('openai');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -96,7 +96,7 @@ async function ingestDocument(id, text, metadata) {
   });
   const embedding = response.data[0].embedding;
   
-  // 2. Store in nDB (nDB's responsibility)
+  // 2. Store in nVDB (nVDB's responsibility)
   coll.insert(id, embedding, JSON.stringify({ ...metadata, text }));
 }
 ```
@@ -146,14 +146,14 @@ We may provide **separate, optional** helper packages for common integration pat
 
 ```bash
 # Optional convenience packages (NOT part of core)
-npm install ndb-openai-helper    # OpenAI integration patterns
-npm install ndb-ollama-helper    # Ollama integration patterns
+npm install nVDB-openai-helper    # OpenAI integration patterns
+npm install nVDB-ollama-helper    # Ollama integration patterns
 ```
 
 These would be:
-- **Separate repositories** from core nDB
+- **Separate repositories** from core nVDB
 - **Community-maintained** or examples only
-- **Not required** for nDB functionality
+- **Not required** for nVDB functionality
 
 ---
 
@@ -166,14 +166,14 @@ Those are **managed services** with different constraints:
 - They charge per embedding + storage + search
 - They can update models centrally
 
-nDB is **embedded software** you run yourself:
+nVDB is **embedded software** you run yourself:
 - You control the infrastructure
 - You choose your embedding provider
-- You pay only for what you use (no nDB fees)
+- You pay only for what you use (no nVDB fees)
 
 ### "I want a one-line ingest experience"
 
-Use a managed service if that's your priority. nDB trades convenience for:
+Use a managed service if that's your priority. nVDB trades convenience for:
 - **Performance** (native speed, no network hops)
 - **Control** (choose any embedding model)
 - **Cost** (no per-request fees)
@@ -181,7 +181,7 @@ Use a managed service if that's your priority. nDB trades convenience for:
 
 ### "What about local models?"
 
-If you need offline embeddings, run Ollama or similar alongside nDB:
+If you need offline embeddings, run Ollama or similar alongside nVDB:
 
 ```yaml
 # docker-compose.yml
@@ -191,10 +191,10 @@ services:
     volumes:
       - ollama:/root/.ollama
     
-  ndb-grpc:
-    image: ndb/ndb-grpc
+  nVDB-grpc:
+    image: nVDB/nVDB-grpc
     volumes:
-      - ndb-data:/data
+      - nVDB-data:/data
 ```
 
 Your application connects to both.
@@ -205,12 +205,12 @@ Your application connects to both.
 
 | Question | Answer |
 |----------|--------|
-| Does nDB generate embeddings? | **No** |
+| Does nVDB generate embeddings? | **No** |
 | Will it ever? | **Not in core** (optional helpers maybe) |
 | Why? | Separation of concerns, existing solutions are excellent |
 | What should I use? | OpenAI, Ollama, HuggingFace, or any embedding service |
-| How do I integrate? | Generate embeddings → Pass vectors to nDB |
+| How do I integrate? | Generate embeddings → Pass vectors to nVDB |
 
-**nDB is a vector database, not an embedding service.**
+**nVDB is a vector database, not an embedding service.**
 
 Use the best tool for each job.

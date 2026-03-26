@@ -1,11 +1,11 @@
 [package]
-name = "ndb-node"
+name = "nvdb-node"
 version = "0.1.0"
 edition = "2021"
-authors = ["nDB Contributors"]
-description = "Node.js native bindings for nDB - high-performance vector database"
+authors = ["nvdb Contributors"]
+description = "Node.js native bindings for nvdb - high-performance vector database"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ndb/ndb"
+repository = "https://github.com/nvdb/nvdb"
 keywords = ["vector", "database", "embedding", "nodejs", "native"]
 categories = ["database", "external-ffi-bindings"]
 rust-version = "1.75"
@@ -18,8 +18,8 @@ crate-type = ["cdylib"]
 napi = { version = "2.16", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
 napi-derive = "2.16"
 
-# Core nDB library
-ndb = { path = ".." }
+# Core nvdb library
+nvdb = { path = ".." }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

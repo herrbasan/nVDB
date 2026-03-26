@@ -53,7 +53,7 @@ data/
     ├── LOCK                    # flock exclusive lock
     ├── wal.log                 # Append-only WAL
     └── segments/
-        └── 0001.ndb            # Immutable mmap segment
+        └── 0001.nVDB            # Immutable mmap segment
 ```
 
 **Write Path:** WAL append → memtable insert → check_flush() → optional flush  

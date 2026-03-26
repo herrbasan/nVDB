@@ -1,10 +1,10 @@
-# nDB Documentation
+# nVDB Documentation
 
-Welcome to the nDB documentation. This directory contains comprehensive guides for using and integrating nDB.
+Welcome to the nVDB documentation. This directory contains comprehensive guides for using and integrating nVDB.
 
 ## Quick Start
 
-New to nDB? Start here:
+New to nVDB? Start here:
 
 1. **[User Guide](user-guide.md)** - Complete API reference and usage examples
 2. **[Integration Guide](integration-guide.md)** - Production integration patterns
@@ -29,7 +29,7 @@ New to nDB? Start here:
 
 | Document | Description |
 |----------|-------------|
-| [Scope and Boundaries](scope-and-boundaries.md) | What nDB is and isn't (no embedding generation) |
+| [Scope and Boundaries](scope-and-boundaries.md) | What nVDB is and isn't (no embedding generation) |
 | [ADR 001: LSM-Lite Storage](adr/001-lsm-lite-storage.md) | Storage architecture decisions |
 | [ADR 002: HNSW Index](adr/002-hnsw-index.md) | Approximate search design |
 | [ADR 003: SIMD Distance](adr/003-simd-distance.md) | SIMD computation choices |
@@ -43,16 +43,16 @@ New to nDB? Start here:
 
 ## Common Tasks
 
-### Adding nDB to Your Project
+### Adding nVDB to Your Project
 
 ```toml
 [dependencies]
-ndb = "0.1"
+nVDB = "0.1"
 serde_json = "1.0"
 ```
 
 ```rust
-use ndb::{Database, CollectionConfig, Document, Search};
+use nVDB::{Database, CollectionConfig, Document, Search};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open("./data")?;
@@ -134,7 +134,7 @@ Documents contain:
 
 ## Support
 
-- **GitHub Issues**: https://github.com/ndb/ndb/issues
+- **GitHub Issues**: https://github.com/nvdb/nvdb/issues
 - **API Docs**: Run `cargo doc --open`
 - **Examples**: See `examples/` directory
 

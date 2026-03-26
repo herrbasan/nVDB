@@ -9,8 +9,8 @@ use std::sync::Arc;
 use crate::error::{Error, Result};
 use crate::id::IdMapping;
 
-/// Magic bytes for segment files: "nDB\0"
-pub const SEGMENT_MAGIC: &[u8; 4] = b"nDB\0";
+/// Magic bytes for segment files: "nvdb"
+pub const SEGMENT_MAGIC: &[u8; 4] = b"nvdb";
 /// Current segment format version
 pub const SEGMENT_VERSION: u16 = 1;
 /// Header size: 64 bytes, aligned
@@ -22,7 +22,7 @@ pub const ALIGNMENT: usize = 64;
 /// 
 /// Layout (text, not Rust code):
 /// ```text
-/// [4]   magic: "nDB\0"
+/// [4]   magic: "nvdb"
 /// [2]   version: u16
 /// [2]   reserved
 /// [4]   dimension: u32

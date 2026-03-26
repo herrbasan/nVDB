@@ -1,4 +1,4 @@
-# nDB WebAssembly Integration
+# nVDB WebAssembly Integration
 
 > **Browser and Edge-compatible vector search**  
 > **Version:** 0.1.0  
@@ -23,7 +23,7 @@ This integration is designed for environments where native modules cannot be use
 
 ## Overview
 
-The WebAssembly (WASM) integration lets you run nDB in browsers, edge functions, and environments where native modules aren't available. It provides **~80-90% of native performance** with the convenience of universal deployment.
+The WebAssembly (WASM) integration lets you run nVDB in browsers, edge functions, and environments where native modules aren't available. It provides **~80-90% of native performance** with the convenience of universal deployment.
 
 ### When to Use WASM
 
@@ -96,14 +96,14 @@ The WebAssembly (WASM) integration lets you run nDB in browsers, edge functions,
 ### npm
 
 ```bash
-npm install ndb-wasm
+npm install nVDB-wasm
 ```
 
 ### CDN (Browser)
 
 ```html
 <script type="module">
-  import init, { WasmDB } from 'https://cdn.jsdelivr.net/npm/ndb-wasm@0.1.0/pkg/ndb_wasm.js';
+  import init, { WasmDB } from 'https://cdn.jsdelivr.net/npm/nVDB-wasm@0.1.0/pkg/ndb_wasm.js';
   
   await init();
   const db = new WasmDB();
@@ -113,7 +113,7 @@ npm install ndb-wasm
 ### ES Modules (Deno, etc.)
 
 ```javascript
-import init, { WasmDB } from 'npm:ndb-wasm';
+import init, { WasmDB } from 'npm:nVDB-wasm';
 
 await init();
 const db = new WasmDB();
@@ -124,7 +124,7 @@ const db = new WasmDB();
 ## Quick Start
 
 ```javascript
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 async function main() {
   // Initialize WASM module
@@ -166,7 +166,7 @@ main();
 ### Initialization
 
 ```javascript
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 // Must call init() before using any WASM functions
 await init();
@@ -283,7 +283,7 @@ const stats = collection.stats();
   <div id="results"></div>
 
   <script type="module">
-    import init, { WasmDB } from 'https://cdn.jsdelivr.net/npm/ndb-wasm@0.1.0/pkg/ndb_wasm.js';
+    import init, { WasmDB } from 'https://cdn.jsdelivr.net/npm/nVDB-wasm@0.1.0/pkg/ndb_wasm.js';
 
     let db;
     let collection;
@@ -359,7 +359,7 @@ const stats = collection.stats();
 
 ```javascript
 // api/search.js
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 let dbPromise;
 
@@ -402,7 +402,7 @@ export default async function handler(request) {
 
 ```javascript
 // worker.js
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 let wasmModule;
 
@@ -442,7 +442,7 @@ export default {
 ```javascript
 // hooks/useVectorDB.js
 import { useEffect, useState, useCallback } from 'react';
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 export function useVectorDB(dimension = 768) {
   const [db, setDb] = useState(null);
@@ -629,9 +629,9 @@ console.log('SIMD available:', hasSIMD);
 ## Building from Source
 
 ```bash
-# Clone nDB
-git clone https://github.com/ndb/ndb
-cd ndb/wasm
+# Clone nVDB
+git clone https://github.com/nvdb/nvdb
+cd nVDB/wasm
 
 # Install wasm-pack
 curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -653,7 +653,7 @@ wasm-pack build --target web --release
 // Server must serve with: Content-Type: application/wasm
 
 // Or use bundled version
-import init from 'ndb-wasm';  // Bundler handles the wasm file
+import init from 'nVDB-wasm';  // Bundler handles the wasm file
 ```
 
 ### "Memory access out of bounds"
@@ -684,4 +684,4 @@ const slow = [0.1, 0.2, ...];  // Slow - needs conversion
 
 ## License
 
-MIT OR Apache-2.0 (same as nDB)
+MIT OR Apache-2.0 (same as nVDB)

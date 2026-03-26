@@ -1,28 +1,28 @@
-# nDB Node.js Native Bindings
+# nVDB Node.js Native Bindings
 
-Native Node.js bindings for nDB - a high-performance embedded vector database.
+Native Node.js bindings for nVDB - a high-performance embedded vector database.
 
 ## Installation via Git Submodule
 
 ```bash
-# Add nDB as a submodule in your project
-git submodule add https://github.com/ndb/ndb.git ndb
+# Add nVDB as a submodule in your project
+git submodule add https://github.com/nvdb/nvdb.git nVDB
 git submodule update --init --recursive
 
 # Build the native module (REQUIRED - binary is not committed)
-cd ndb/napi
+cd nVDB/napi
 node setup.js
 
 # For Windows: copy/symlink the DLL to the expected name
-copy target\release\ndb_node.dll napi\ndb-node.win32-x64-msvc.node
+copy target\release\nvdb_node.dll napi\nvdb-node.win32-x64-msvc.node
 # Or on Unix:
-# ln -s target/release/libndb_node.so napi/ndb-node.linux-x64-gnu.node
+# ln -s target/release/libnvdb_node.so napi/nvdb-node.linux-x64-gnu.node
 ```
 
 ## Usage
 
 ```javascript
-const { Database, FilterBuilder } = require('./ndb/napi');
+const { Database, FilterBuilder } = require('./nVDB/napi');
 
 // Open or create database
 const db = new Database('./data');
@@ -59,11 +59,11 @@ You can specify the native binary path directly:
 
 ```bash
 # Windows
-set NODE_NDB_NATIVE_PATH=D:\path\to\ndb_node.dll
+set NODE_NVDB_NATIVE_PATH=D:\path\to\nvdb_node.dll
 node your-app.js
 
 # Unix
-export NODE_NDB_NATIVE_PATH=/path/to/libndb_node.so
+export NODE_NVDB_NATIVE_PATH=/path/to/libnvdb_node.so
 node your-app.js
 ```
 
@@ -73,17 +73,17 @@ The loader looks for files matching these patterns:
 
 | Platform | Architecture | Binary Name |
 |----------|-------------|-------------|
-| Windows | x64 | `ndb-node.win32-x64-msvc.node` |
-| Windows | arm64 | `ndb-node.win32-arm64-msvc.node` |
-| macOS | x64 | `ndb-node.darwin-x64.node` |
-| macOS | arm64 | `ndb-node.darwin-arm64.node` |
-| Linux | x64 | `ndb-node.linux-x64-gnu.node` |
-| Linux | arm64 | `ndb-node.linux-arm64-gnu.node` |
+| Windows | x64 | `nvdb-node.win32-x64-msvc.node` |
+| Windows | arm64 | `nvdb-node.win32-arm64-msvc.node` |
+| macOS | x64 | `nvdb-node.darwin-x64.node` |
+| macOS | arm64 | `nvdb-node.darwin-arm64.node` |
+| Linux | x64 | `nvdb-node.linux-x64-gnu.node` |
+| Linux | arm64 | `nvdb-node.linux-arm64-gnu.node` |
 
 If the file doesn't exist with the expected name, the loader also checks:
-- `target/release/ndb_node.dll` (Windows)
-- `target/release/libndb_node.so` (Linux)
-- `target/release/libndb_node.dylib` (macOS)
+- `target/release/nvdb_node.dll` (Windows)
+- `target/release/libnvdb_node.so` (Linux)
+- `target/release/libnvdb_node.dylib` (macOS)
 
 ## API Reference
 
@@ -135,7 +135,7 @@ collection.stats;  // { memtableDocs, segmentCount, totalSegmentDocs }
 ### FilterBuilder
 
 ```javascript
-const { FilterBuilder } = require('./ndb/napi');
+const { FilterBuilder } = require('./nVDB/napi');
 
 // Comparison filters
 FilterBuilder.eq('field', value);      // field == value
@@ -155,10 +155,10 @@ FilterBuilder.or([filter1, filter2]);
 
 ```bash
 # Build debug version
-cargo build -p ndb-node
+cargo build -p nvdb-node
 
 # Build release version (optimized)
-cargo build --release -p ndb-node
+cargo build --release -p nvdb-node
 
 # Run example
 cd napi
@@ -169,7 +169,7 @@ node examples/basic.js
 
 ```
 your-project/
-├── ndb/                    # git submodule
+├── nVDB/                    # git submodule
 │   ├── napi/              # this directory
 │   │   ├── index.js       # loader
 │   │   ├── index.d.ts     # TypeScript types
@@ -177,7 +177,7 @@ your-project/
 │   ├── src/               # Rust source
 │   └── target/
 │       └── release/
-│           └── ndb_node.dll   # native binary
+│           └── nvdb_node.dll   # native binary
 ├── your-app.js
 └── .gitmodules
 ```
@@ -194,4 +194,4 @@ your-project/
 
 ## License
 
-MIT OR Apache-2.0 (same as nDB)
+MIT OR Apache-2.0 (same as nVDB)

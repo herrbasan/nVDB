@@ -5,7 +5,7 @@
 //! Created: 2026-02-14 17:16:48+01:00
 //! Phase: 1A — File Format, Mmap & Validation
 
-use ndb::{Document, Segment, SegmentBuilder};
+use nvdb::{Document, Segment, SegmentBuilder};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -77,7 +77,7 @@ fn test_segment_header_format() {
     file.read_exact(&mut header_bytes).unwrap();
 
     // Verify magic bytes
-    assert_eq!(&header_bytes[0..4], b"nDB\0");
+    assert_eq!(&header_bytes[0..4], b"nvdb");
 
     // Verify version (little-endian u16 at offset 4)
     let version = u16::from_le_bytes([header_bytes[4], header_bytes[5]]);

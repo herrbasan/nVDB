@@ -1,4 +1,4 @@
-# nDB User Guide
+# nVDB User Guide
 
 > **Version:** 0.1.0  
 > **Last Updated:** 2026-02-14
@@ -20,7 +20,7 @@
 
 ## Introduction
 
-nDB is a high-performance, embedded, in-memory vector database designed for LLM workflows. It provides:
+nVDB is a high-performance, embedded, in-memory vector database designed for LLM workflows. It provides:
 
 - **Deterministic correctness**: Design failures away rather than handling them
 - **Zero-copy reads**: Memory-mapped persistence for instant recovery
@@ -28,14 +28,14 @@ nDB is a high-performance, embedded, in-memory vector database designed for LLM 
 - **HNSW approximate search**: Configurable recall vs latency tradeoffs
 - **MongoDB-compatible filters**: Query by metadata with a familiar DSL
 
-### When to Use nDB
+### When to Use nVDB
 
 - Storing embeddings from LLMs (768-1536 dimensions)
 - Similarity search with optional metadata filtering
 - Read-heavy workloads with occasional bulk writes
 - Single-node deployments where embedded databases are appropriate
 
-### When NOT to Use nDB
+### When NOT to Use nVDB
 
 - Client-server architecture (use Qdrant, Milvus, etc.)
 - Distributed/multi-node requirements
@@ -49,17 +49,17 @@ nDB is a high-performance, embedded, in-memory vector database designed for LLM 
 
 ### Installation
 
-Add nDB to your `Cargo.toml`:
+Add nVDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ndb = "0.1"
+nVDB = "0.1"
 ```
 
 ### Basic Usage
 
 ```rust
-use ndb::{Database, CollectionConfig, Document, Distance, Search};
+use nVDB::{Database, CollectionConfig, Document, Distance, Search};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open or create a database
@@ -141,7 +141,7 @@ let doc = Document {
 
 ### Distance Metrics
 
-nDB supports three distance metrics:
+nVDB supports three distance metrics:
 
 | Metric | Range | Higher is Better | Best For |
 |--------|-------|------------------|----------|
@@ -150,7 +150,7 @@ nDB supports three distance metrics:
 | `Euclidean` | [0, ∞) | No | L2 distance |
 
 ```rust
-use ndb::{Search, Distance};
+use nVDB::{Search, Distance};
 
 // Use cosine similarity (default for HNSW)
 let search = Search::new(&query)
@@ -204,7 +204,7 @@ collection.sync()?;
 ### Search
 
 ```rust
-use ndb::{Search, Filter};
+use nVDB::{Search, Filter};
 
 // Basic exact search
 let results = collection.search(
@@ -269,7 +269,7 @@ println!(
 
 ## Durability Modes
 
-nDB offers two durability modes:
+nVDB offers two durability modes:
 
 ### Buffered (Default)
 
@@ -311,7 +311,7 @@ let config = CollectionConfig::new(768)
 ### HNSW Parameters
 
 ```rust
-use ndb::{HnswParams, CollectionConfig};
+use nVDB::{HnswParams, CollectionConfig};
 
 // Custom HNSW parameters
 let params = HnswParams::default()
@@ -505,7 +505,7 @@ for doc in old_coll.iter() {
 
 - **API Documentation**: `cargo doc --open`
 - **Benchmarks**: `cargo bench`
-- **Repository**: https://github.com/ndb/ndb
+- **Repository**: https://github.com/nvdb/nvdb
 
 ---
 

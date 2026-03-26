@@ -2,7 +2,7 @@
 //!
 //! Tests for brute-force vector search with SIMD acceleration.
 
-use ndb::{CollectionConfig, Database, Distance, Document, Search};
+use nvdb::{CollectionConfig, Database, Distance, Document, Search};
 use tempfile::TempDir;
 
 fn create_doc(id: &str, vector: Vec<f32>) -> Document {

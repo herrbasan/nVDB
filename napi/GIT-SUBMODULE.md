@@ -1,14 +1,14 @@
 # Git Submodule Integration Guide
 
-This guide explains how to integrate nDB into your Node.js project using git submodules (without NPM).
+This guide explains how to integrate nVDB into your Node.js project using git submodules (without NPM).
 
 ## Quick Start
 
-### 1. Add nDB as a Submodule
+### 1. Add nVDB as a Submodule
 
 ```bash
 cd your-project
-git submodule add https://github.com/ndb/ndb.git ndb
+git submodule add https://github.com/nvdb/nvdb.git nVDB
 git submodule update --init --recursive
 ```
 
@@ -17,38 +17,38 @@ git submodule update --init --recursive
 **Option A: Use the setup script (recommended)**
 
 ```bash
-cd ndb/napi
+cd nVDB/napi
 node setup.js
 ```
 
 **Option B: Manual build**
 
 ```bash
-cd ndb
+cd nVDB
 
 # Build the native module
-cargo build --release -p ndb-node
+cargo build --release -p nvdb-node
 
 # Copy/link the binary (platform-specific)
 
 # Windows:
-copy target\release\ndb_node.dll napi\ndb-node.win32-x64-msvc.node
+copy target\release\nvdb_node.dll napi\nvdb-node.win32-x64-msvc.node
 
 # macOS (Intel):
-ln -s target/release/libndb_node.dylib napi/ndb-node.darwin-x64.node
+ln -s target/release/libnvdb_node.dylib napi/nvdb-node.darwin-x64.node
 
 # macOS (Apple Silicon):
-ln -s target/release/libndb_node.dylib napi/ndb-node.darwin-arm64.node
+ln -s target/release/libnvdb_node.dylib napi/nvdb-node.darwin-arm64.node
 
 # Linux (x64):
-ln -s target/release/libndb_node.so napi/ndb-node.linux-x64-gnu.node
+ln -s target/release/libnvdb_node.so napi/nvdb-node.linux-x64-gnu.node
 ```
 
 ### 3. Use in Your Project
 
 ```javascript
 // In your project's JavaScript files
-const { Database, FilterBuilder } = require('./ndb/napi');
+const { Database, FilterBuilder } = require('./nVDB/napi');
 
 const db = new Database('./data');
 const collection = db.createCollection('docs', 1536);
@@ -63,11 +63,11 @@ After setup, your project should look like:
 
 ```
 your-project/
-├── ndb/                           # git submodule
+├── nVDB/                           # git submodule
 │   ├── napi/
 │   │   ├── index.js              # JS loader
 │   │   ├── index.d.ts            # TypeScript types
-│   │   ├── ndb-node.XXX.node     # native binary (created by setup)
+│   │   ├── nvdb-node.XXX.node     # native binary (created by setup)
 │   │   └── setup.js              # build helper
 │   ├── src/                       # Rust source
 │   └── target/release/            # Rust build output
@@ -82,20 +82,20 @@ If you want to use a different native binary location:
 
 ```bash
 # Windows
-set NODE_NDB_NATIVE_PATH=D:\custom\path\ndb_node.dll
+set NODE_NVDB_NATIVE_PATH=D:\custom\path\nvdb_node.dll
 node your-app.js
 
 # macOS/Linux
-export NODE_NDB_NATIVE_PATH=/custom/path/libndb_node.so
+export NODE_NVDB_NATIVE_PATH=/custom/path/libnvdb_node.so
 node your-app.js
 ```
 
-## Updating nDB
+## Updating nVDB
 
 To update to the latest version:
 
 ```bash
-cd ndb
+cd nVDB
 git pull origin main
 cd napi
 node setup.js  # Rebuild native module
@@ -107,10 +107,10 @@ For automated builds, add this to your CI pipeline:
 
 ```yaml
 # Example GitHub Actions step
-- name: Build nDB native module
+- name: Build nVDB native module
   run: |
     git submodule update --init --recursive
-    cd ndb/napi
+    cd nVDB/napi
     node setup.js
 ```
 
@@ -118,7 +118,7 @@ For automated builds, add this to your CI pipeline:
 
 ### "Native binary not found"
 
-Run `node setup.js` in the `ndb/napi` directory, or set `NODE_NDB_NATIVE_PATH`.
+Run `node setup.js` in the `nVDB/napi` directory, or set `NODE_NVDB_NATIVE_PATH`.
 
 ### "Failed to load native module"
 
@@ -135,8 +135,8 @@ Only one process can open a collection at a time. Close other Node.js processes 
 If you need to support multiple platforms, you can build all variants and commit them:
 
 ```bash
-# In ndb/napi - after building on each platform
-git add ndb-node.*.node
+# In nVDB/napi - after building on each platform
+git add nvdb-node.*.node
 git commit -m "Add native binaries"
 ```
 

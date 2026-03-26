@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// All errors that can occur in nDB operations.
+/// All errors that can occur in nvdb operations.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -91,5 +91,5 @@ impl Error {
     }
 }
 
-/// Result type alias for nDB operations.
+/// Result type alias for nvdb operations.
 pub type Result<T> = std::result::Result<T, Error>;

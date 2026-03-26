@@ -1,10 +1,10 @@
-# nDB Integrations
+# nVDB Integrations
 
-This directory contains integration guides for using nDB in different environments and languages.
+This directory contains integration guides for using nVDB in different environments and languages.
 
 ## Core Library vs Integrations
 
-**nDB core** is an **embedded library** - it runs in-process with your Rust application. The integrations below are optional ways to use nDB from other languages or environments:
+**nVDB core** is an **embedded library** - it runs in-process with your Rust application. The integrations below are optional ways to use nVDB from other languages or environments:
 
 | Integration | Best For | Performance | File System |
 |-------------|----------|-------------|-------------|
@@ -19,7 +19,7 @@ This directory contains integration guides for using nDB in different environmen
 What is your deployment environment?
 
   ┌─────────────┐
-  │  Rust app?  │───yes──▶ nDB crate (see User Guide)
+  │  Rust app?  │───yes──▶ nVDB crate (see User Guide)
   └──────┬──────┘
          │no
   ┌──────▼──────┐
@@ -40,19 +40,19 @@ What is your deployment environment?
 ### N-API (Node.js)
 
 ```bash
-npm install ndb-node
+npm install nvdb-node
 ```
 
 ### WebAssembly
 
 ```bash
-npm install ndb-wasm
+npm install nVDB-wasm
 ```
 
 ### gRPC Client (Node.js)
 
 ```bash
-npm install @grpc/grpc-js @grpc/proto-loader ndb-grpc-client
+npm install @grpc/grpc-js @grpc/proto-loader nVDB-grpc-client
 ```
 
 ## Feature Comparison
@@ -74,7 +74,7 @@ npm install @grpc/grpc-js @grpc/proto-loader ndb-grpc-client
 ### N-API
 
 ```javascript
-const { Database } = require('ndb-node');
+const { Database } = require('nvdb-node');
 
 const db = new Database('./data');
 const coll = db.createCollection('docs', 768);
@@ -86,7 +86,7 @@ const results = coll.search({ vector: query, topK: 10 });
 ### WebAssembly
 
 ```javascript
-import init, { WasmDB } from 'ndb-wasm';
+import init, { WasmDB } from 'nVDB-wasm';
 
 await init();
 const db = new WasmDB();
@@ -99,7 +99,7 @@ const results = coll.search(new Float32Array(query), 10);
 ### gRPC
 
 ```javascript
-const { VectorServiceClient } = require('ndb-grpc-client');
+const { VectorServiceClient } = require('nVDB-grpc-client');
 
 const client = new VectorServiceClient('localhost:50051');
 
@@ -111,7 +111,7 @@ const { results } = await client.search({ collection: 'docs', vector: query, top
 
 All three integrations provide TypeScript definitions:
 
-- **N-API**: JSDoc annotations + optional `@types/ndb-node`
+- **N-API**: JSDoc annotations + optional `@types/nvdb-node`
 - **WASM**: JSDoc annotations + optional type definitions
 - **gRPC**: Auto-generated from `.proto` files
 
@@ -122,4 +122,4 @@ All examples use **plain JavaScript** - TypeScript is completely optional.
 - **N-API issues**: See [N-API troubleshooting](./napi.md#troubleshooting)
 - **WASM issues**: See [WASM troubleshooting](./wasm.md#troubleshooting)
 - **gRPC issues**: See [gRPC troubleshooting](./grpc.md#troubleshooting)
-- **General issues**: https://github.com/ndb/ndb/issues
+- **General issues**: https://github.com/nvdb/nvdb/issues

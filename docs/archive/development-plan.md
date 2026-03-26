@@ -1,8 +1,8 @@
-# nDB Development Plan
+# nVDB Development Plan
 
 ## Overview
 
-This document outlines the incremental development of nDB, from core storage primitives to a complete vector database. Each phase builds on the previous, with working code at every milestone.
+This document outlines the incremental development of nVDB, from core storage primitives to a complete vector database. Each phase builds on the previous, with working code at every milestone.
 
 ---
 

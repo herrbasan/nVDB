@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use ndb::{Database, CollectionConfig};
+use nvdb::{Database, CollectionConfig};
 use serde_json::json;
 use tempfile::TempDir;
 use std::fs;
@@ -24,7 +24,7 @@ fn create_db_with_wal_size(doc_count: usize) -> (TempDir, String) {
     // Insert documents (without flushing to keep them in WAL)
     let vectors = generate_vectors(doc_count, 128);
     for (i, vec) in vectors.iter().enumerate() {
-        collection.insert(ndb::Document {
+        collection.insert(nvdb::Document {
             id: format!("doc_{}", i),
             vector: vec.clone(),
             payload: Some(json!({"idx": i, "data": "some payload data to increase size"})),
@@ -95,7 +95,7 @@ fn bench_recovery_with_segments(c: &mut Criterion) {
             // Insert documents and flush to create segments
             let vectors = generate_vectors(10000, 128);
             for (i, vec) in vectors.iter().enumerate() {
-                collection.insert(ndb::Document {
+                collection.insert(nvdb::Document {
                     id: format!("doc_{}", i),
                     vector: vec.clone(),
                     payload: Some(json!({"idx": i})),
@@ -108,7 +108,7 @@ fn bench_recovery_with_segments(c: &mut Criterion) {
             // Insert more documents (stay in WAL)
             for i in 10000..10500 {
                 let vec = generate_vector(128, i);
-                collection.insert(ndb::Document {
+                collection.insert(nvdb::Document {
                     id: format!("doc_{}", i),
                     vector: vec,
                     payload: Some(json!({"idx": i})),
@@ -146,7 +146,7 @@ fn bench_index_build_time(c: &mut Criterion) {
                 // Insert documents
                 let vectors = generate_vectors(count, 128);
                 for (i, vec) in vectors.iter().enumerate() {
-                    collection.insert(ndb::Document {
+                    collection.insert(nvdb::Document {
                         id: format!("doc_{}", i),
                         vector: vec.clone(),
                         payload: None,

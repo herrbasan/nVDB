@@ -1,8 +1,8 @@
-//! Basic nDB usage example
+//! Basic nvdb usage example
 //! 
 //! Run with: cargo run --example basic_usage
 
-use ndb::{Database, CollectionConfig, Document, Search, Filter};
+use nvdb::{Database, CollectionConfig, Document, Search, Filter};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open or create a database

@@ -2,7 +2,7 @@
 /* eslint-disable */
 
 /**
- * Database class for nDB
+ * Database class for nVDB
  *
  * Provides access to the embedded vector database. Each database
  * can contain multiple collections with different vector dimensions.

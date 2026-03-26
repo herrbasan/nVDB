@@ -1,8 +1,8 @@
-# nDB Project - Agent Guide
+# nVDB Project - Agent Guide
 
 ## Project Overview
 
-nDB is a high-performance, embedded, in-memory vector database designed for LLM workflows. It is written in Rust and provides a minimal but complete API for vector storage and similarity search.
+nVDB is a high-performance, embedded, in-memory vector database designed for LLM workflows. It is written in Rust and provides a minimal but complete API for vector storage and similarity search.
 
 ### Key Characteristics
 
@@ -244,7 +244,7 @@ mod tests {
 
 ```rust
 // tests/phaseX_feature_tests.rs
-use ndb::{Database, CollectionConfig, Document, /* ... */};
+use nVDB::{Database, CollectionConfig, Document, /* ... */};
 use tempfile::TempDir;
 
 #[test]
@@ -404,7 +404,7 @@ coll.delete(id)?;                            // Soft delete
 ### Search
 
 ```rust
-use ndb::{Search, Distance, Filter};
+use nVDB::{Search, Distance, Filter};
 
 // Exact search
 let results = coll.search(

@@ -1,4 +1,4 @@
-# nDB Test Documentation
+# nVDB Test Documentation
 
 > **Last Updated:** 2026-02-14 21:15:00+01:00  
 > **Phase:** 5 — Maintenance: Compaction  
@@ -6,7 +6,7 @@
 
 ## Overview
 
-This document describes the test suite for nDB. Tests are organized by component and verify both functional correctness and architectural invariants.
+This document describes the test suite for nVDB. Tests are organized by component and verify both functional correctness and architectural invariants.
 
 ---
 
