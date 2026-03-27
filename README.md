@@ -1,100 +1,77 @@
 # nVDB
 
-A high-performance, embedded, in-memory vector database designed for LLM workflows.
+> High-performance embedded vector database for AI/ML workflows.
 
-## Overview
+nVDB is an **embedded vector database** with SIMD-accelerated similarity search, optional HNSW approximate search, and MongoDB-like metadata filtering. Standalone embeddable database for Node.js and Rust applications.
 
-nVDB provides fast vector storage and similarity search with a minimal but complete API. It's designed for applications requiring low-latency vector operations without the overhead of a distributed database.
+## Features
 
-```rust
-use nVDB::{Database, CollectionConfig, Document, Search};
-
-let db = Database::open("./data")?;
-let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
-
-coll.insert(Document {
-    id: "doc1".to_string(),
-    vector: vec![0.1; 768],
-    payload: Some(serde_json::json!({"text": "Hello world"})),
-})?;
-
-let results = coll.search(Search::new(&query).top_k(10))?;
-```
-
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Zero-copy reads** | Memory-mapped persistence for instant recovery |
-| **SIMD-accelerated search** | AVX2/AVX-512/NEON via the `wide` crate |
-| **HNSW approximate search** | Configurable recall vs latency tradeoffs |
-| **MongoDB-like filters** | Query by metadata with a familiar DSL |
-| **LSM-Lite storage** | Memtable + mmap segments + WAL |
-| **Embedded library** | Integrated directly into your application |
-| **Single writer** | Natural for embedded use - your app is the only writer |
-
-## When to Use nVDB
-
-- Storing embeddings from LLMs (768-1536 dimensions)
-- Similarity search with optional metadata filtering
-- Read-heavy workloads with occasional bulk writes
-- Single-node deployments where embedded databases are appropriate
-
-## When NOT to Use nVDB
-
-- Client-server architecture (use Qdrant, Milvus, etc.)
-- Distributed/multi-node requirements
-- Multiple independent applications writing to the same data
-- Complex multi-document transactions
-- SQL-style queries with joins
-
-## Installation
-
-```toml
-# Cargo.toml
-[dependencies]
-nVDB = "0.1"
-serde_json = "1.0"
-```
+- **SIMD-accelerated search** — AVX2/AVX-512/NEON via the `wide` crate (8-wide `f32x8`)
+- **HNSW approximate search** — Sub-linear search with configurable recall/latency tradeoffs
+- **LSM-Lite storage** — Memtable + memory-mapped segments + WAL for crash recovery
+- **Zero-copy reads** — Memory-mapped segments mean instant startup, no loading
+- **MongoDB-like filters** — Query by metadata with a familiar DSL
+- **Multiple collections** — Different embedding models in one database
+- **Node.js native bindings** — napi-rs powered, zero-copy where possible
+- **Crash-safe** — WAL ensures no data loss on power failure
 
 ## Quick Start
 
+### Rust
+
 ```rust
-use nVDB::{Database, CollectionConfig, Document, Distance, Search};
+use nvdb::{Database, CollectionConfig, Document, Distance, Search};
+use serde_json::json;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::open("./data")?;
+// Open a database
+let db = Database::open("./data")?;
 
-    let collection = db.create_collection(
-        "embeddings",
-        CollectionConfig::new(768)
-    )?;
+// Create a collection with 768-dimensional vectors
+let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
 
-    // Insert documents
-    collection.insert(Document {
-        id: "doc1".to_string(),
-        vector: vec![0.1; 768],
-        payload: Some(serde_json::json!({
-            "title": "Example",
-            "category": "tutorial"
-        })),
-    })?;
+// Insert a document
+coll.insert(Document {
+    id: "doc1".to_string(),
+    vector: vec![0.1; 768],
+    payload: Some(json!({"title": "Hello world", "category": "greeting"})),
+})?;
 
-    // Search with HNSW approximation
-    let query = vec![0.1; 768];
-    let results = collection.search(
-        Search::new(&query)
-            .top_k(10)
-            .distance(Distance::Cosine)
-            .approximate(true)
-            .ef(64)
-    )?;
+// Flush to segment
+coll.flush()?;
 
-    for m in results {
-        println!("{}: score={:.3}", m.id, m.score);
-    }
+// Search
+let query = vec![0.1; 768];
+let results = coll.search(
+    Search::new(&query)
+        .top_k(10)
+        .distance(Distance::Cosine)
+)?;
 
-    Ok(())
+for m in &results {
+    println!("{}: score={:.4}", m.id, m.score);
+}
+```
+
+### Node.js
+
+```js
+const { Database } = require('nvdb');
+
+const db = new Database('./data');
+const coll = db.createCollection('embeddings', 768);
+
+// Insert
+coll.insert('doc1', vector768, JSON.stringify({ title: 'Hello world' }));
+
+// Search
+const results = coll.search({
+    vector: queryVector,
+    topK: 10,
+    distance: 'cosine'
+});
+
+for (const match of results) {
+    console.log(`${match.id}: score=${match.score.toFixed(4)}`);
 }
 ```
 
@@ -102,34 +79,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Document | Description |
 |----------|-------------|
-| [User Guide](docs/user-guide.md) | Complete API reference, configuration, best practices |
-| [Integration Guide](docs/integration-guide.md) | Integration patterns, platform setup, deployment |
-| [Scope & Boundaries](docs/scope-and-boundaries.md) | What nVDB is and isn't |
-| [Test Documentation](docs/test-documentation.md) | Test suite details |
+| [Architecture](documentation/architecture.md) | Internal design, storage format, concurrency model |
+| [Rust API](documentation/rust-api.md) | Complete Rust API reference |
+| [Node.js API](documentation/nodejs-api.md) | Complete Node.js API reference |
+| [Filter DSL](documentation/filter-dsl.md) | Metadata filtering with MongoDB-like syntax |
 
 ## API Overview
 
 ### Database Operations
 
 ```rust
-let db = Database::open(path)?;
-let coll = db.create_collection(name, config)?;
-let names = db.collection_names()?;
+let db = Database::open("./data")?;
+let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
+let names = db.list_collections();
+db.drop_collection("old_data")?;
 ```
 
 ### Document Operations
 
 ```rust
-coll.insert(doc)?;
+// Insert
+coll.insert(Document {
+    id: "doc1".to_string(),
+    vector: vec![0.1; 768],
+    payload: Some(json!({"title": "Example"})),
+})?;
+
+// Batch insert
 coll.insert_batch(docs)?;
-coll.get(id)?;
-coll.delete(id)?;
+
+// Get
+let doc = coll.get("doc1")?;
+
+// Delete (soft delete)
+coll.delete("doc1")?;
+
+// Flush memtable to segment
 coll.flush()?;
 ```
 
 ### Search
 
 ```rust
+use nvdb::{Search, Distance, Filter};
+
 // Exact search (100% recall)
 let results = coll.search(Search::new(&query).top_k(10))?;
 
@@ -141,21 +134,77 @@ let results = coll.search(
         .ef(128)
 )?;
 
-// With filter
+// Filtered search
 let results = coll.search(
     Search::new(&query)
         .top_k(10)
-        .filter(Filter::eq("category", "tutorial"))
+        .filter(Filter::and([
+            Filter::eq("category", "tutorial"),
+            Filter::gte("year", 2023),
+        ]))
 )?;
 ```
 
 ### Index Management
 
 ```rust
-coll.rebuild_index()?;    // Build HNSW index
-coll.delete_index()?;     // Remove index
-coll.compact()?;          // Remove deleted docs, rebuild index
+// Build HNSW index
+coll.rebuild_index(None, None)?;
+
+// Build with custom parameters
+coll.rebuild_index(
+    Some(HnswParams::with_m(32)),
+    Some(Distance::Cosine),
+)?;
+
+// Compact segments + rebuild index
+coll.compact()?;
+
+// Remove index
+coll.delete_index()?;
 ```
+
+## Architecture
+
+nVDB uses an **LSM-Lite** architecture:
+
+```
+┌─────────────────────────────────────────────┐
+│  Memtable (HashMap + SoA)    ← Read+Write  │
+├─────────────────────────────────────────────┤
+│  Segments (mmap, immutable)  ← Read-only   │
+├─────────────────────────────────────────────┤
+│  WAL (append-only)           ← Crash safe  │
+├─────────────────────────────────────────────┤
+│  HNSW Index (CSR graph)      ← On-demand   │
+└─────────────────────────────────────────────┘
+```
+
+- **Writes** go to WAL + memtable
+- **Reads** check memtable first, then segments
+- **Flush** freezes memtable → new segment
+- **Compaction** merges segments, removes deleted docs
+
+## Performance
+
+| Dataset Size | Exact Search | Approximate (HNSW) |
+|--------------|--------------|-------------------|
+| 10K docs | <1ms | <1ms |
+| 100K docs | 5-10ms | 1-2ms |
+| 1M docs | 50-100ms | 2-5ms |
+| 10M docs | 500ms-1s | 5-10ms |
+
+*Benchmarks with 768-dimensional vectors, cosine similarity, single thread.*
+
+## Distance Metrics
+
+| Metric | Score Direction | Best For |
+|--------|----------------|----------|
+| **Cosine** (default) | Higher = more similar | Normalized embeddings |
+| **Dot Product** | Higher = more similar | Pre-normalized vectors |
+| **Euclidean** | Lower = more similar | Spatial data |
+
+All metrics use SIMD acceleration (AVX2/AVX-512/NEON).
 
 ## Build & Test
 
@@ -181,27 +230,20 @@ cargo run --example rag_system
 cargo run --example web_service
 ```
 
-## Architecture
+## When to Use nVDB
 
-nVDB is an **embedded library** - it runs in-process with your application, not as a separate server. Think of it like SQLite for vectors.
+- Storing embeddings from LLMs (768-1536 dimensions)
+- Similarity search with optional metadata filtering
+- Read-heavy workloads with occasional bulk writes
+- Single-node deployments where embedded databases are appropriate
+- Electron and Node.js applications needing local vector search
 
-```
-Your Code → nVDB (embedded) → WAL, Segments, Index (Filesystem)
-```
+## When NOT to Use nVDB
 
-This design means:
-- No network overhead - direct function calls
-- No separate database server to run
-- Single writer (your application)
-
-## Performance
-
-| Dataset Size | Exact Search | Approximate (HNSW) |
-|--------------|--------------|-------------------|
-| 10K docs | <1ms | <1ms |
-| 100K docs | 5-10ms | 1-2ms |
-| 1M docs | 50-100ms | 2-5ms |
-| 10M docs | 500ms-1s | 5-10ms |
+- Client-server architecture (use Qdrant, Milvus, etc.)
+- Distributed/multi-node requirements
+- Multiple independent applications writing to the same data
+- Complex multi-document transactions
 
 ## License
 
