@@ -314,7 +314,7 @@ impl Wal {
     ///
     /// If the WAL exists, scans to find the next sequence number.
     /// If last_seq is provided, validates consistency.
-    pub fn open(path: impl AsRef<Path>, last_seq: Option<u64>) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>, _last_seq: Option<u64>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let exists = path.exists();
 
@@ -435,7 +435,7 @@ impl Wal {
 
             let header = match RecordHeader::from_bytes(&header_buf) {
                 Ok(h) => h,
-                Err(e) => {
+                Err(_e) => {
                     // Corrupt header - truncate here
                     let pos = self.file.stream_position().map_err(Error::io_err(
                         &self.path,

@@ -51,7 +51,7 @@ pub mod search;
 pub mod segment;
 pub mod wal;
 
-pub use compaction::CompactionResult;
+pub use crate::compaction::CompactionResult;
 pub use distance::Distance;
 pub use error::{Error, Result};
 pub use filter::Filter;
@@ -404,7 +404,7 @@ impl Collection {
         let path = db.path().join(name);
 
         // Clean up orphan temp files from interrupted compactions
-        let _ = compaction::cleanup_temp_files(&path);
+        let _ = crate::compaction::cleanup_temp_files(&path);
 
         // Load manifest
         let manifest_path = path.join(manifest::MANIFEST_FILE_NAME);
@@ -520,7 +520,7 @@ impl Collection {
 
         // Append to WAL
         let mut wal = self.wal.lock().unwrap();
-        let seq = match self.config.durability {
+        let _seq = match self.config.durability {
             Durability::Buffered => wal.append(&record, self.config.dim)?,
             Durability::FdatasyncEachBatch => wal.append_and_sync(&record, self.config.dim)?,
         };
@@ -782,11 +782,11 @@ impl Collection {
     /// let result = coll.compact()?;
     /// println!("Reduced from {} to {} documents", result.docs_before, result.docs_after);
     /// ```
-    pub fn compact(&self) -> Result<CompactionResult> {
+    pub fn compact(&self) -> Result<crate::compaction::CompactionResult> {
         // Collect deleted IDs BEFORE flushing - flush replaces the memtable
         let deleted_ids = {
             let memtable = self.memtable.read().unwrap();
-            compaction::collect_deleted_ids(&memtable)
+            crate::compaction::collect_deleted_ids(&memtable)
         };
 
         // Flush the memtable to ensure all data is in segments
@@ -811,7 +811,7 @@ impl Collection {
 
         // Perform compaction
         let mut manifest_guard = self.manifest.lock().unwrap();
-        let result = compaction::compact_with_deleted_ids(
+        let result = crate::compaction::compact_with_deleted_ids(
             &segments,
             &deleted_ids,
             self.config.dim,
@@ -857,6 +857,75 @@ impl Collection {
         wal.reset()?;
 
         Ok(result)
+    }
+
+    /// Reads the entire database and returns all active documents.
+    pub fn export_all_docs(&self) -> Result<Vec<Document>> {
+        self.flush()?;
+        let deleted_ids = {
+            let memtable = self.memtable.read().unwrap();
+            crate::compaction::collect_deleted_ids(&memtable)
+        };
+        let segments = self.segments.load();
+        crate::compaction::merge_segments(&segments, &deleted_ids, self.config.dim)
+    }
+
+    /// Get collection statistics
+    pub fn export_snapshot<P: AsRef<Path>>(&self, target_dir: P) -> Result<()> {
+        let target = target_dir.as_ref();
+        
+        let deleted_ids = {
+            let memtable = self.memtable.read().unwrap();
+            crate::compaction::collect_deleted_ids(&memtable)
+        };
+
+        self.flush()?;
+
+        let segments = self.segments.load();
+        
+        let target_segments = target.join("segments");
+        std::fs::create_dir_all(&target_segments)
+            .map_err(crate::error::Error::io_err(&target_segments, "create target segments dir"))?;
+            
+        let merged_docs = crate::compaction::merge_segments(&segments, &deleted_ids, self.config.dim)?;
+        let docs_after = merged_docs.len();
+        
+        let mut builder = crate::segment::SegmentBuilder::new(self.config.dim);
+        for doc in &merged_docs {
+            builder.add(doc.clone())?;
+        }
+        
+        let final_segment_filename = format!("{:04}.nvdb", 1);
+        let final_segment_path = target_segments.join(&final_segment_filename);
+        builder.build(&final_segment_path)?;
+
+        let mut index_file = None;
+        if self.has_index() {
+            let index = crate::compaction::build_hnsw_index(&merged_docs, self.config.dim, crate::distance::Distance::Cosine)?;
+            let index_path = target.join("index.hnsw");
+            let bytes = index.to_bytes()?;
+            std::fs::write(&index_path, bytes)
+                .map_err(crate::error::Error::io_err(&index_path, "failed to write HNSW index"))?;
+            index_file = Some("index.hnsw".to_string());
+        }
+
+        let mut config_clone = self.config.clone();
+        let mut safe_manifest = crate::manifest::Manifest::new(config_clone);
+        if docs_after > 0 {
+            safe_manifest.add_segment(crate::manifest::SegmentEntry {
+                filename: final_segment_filename,
+                doc_count: docs_after as u64,
+                id_range: (0, docs_after as u32),
+            });
+        }
+        
+        safe_manifest.set_index_file(index_file);
+        safe_manifest.set_last_wal_seq(0);
+
+        let manifest_path = target.join(crate::manifest::MANIFEST_FILE_NAME);
+        safe_manifest.save(&manifest_path)?;
+
+        Ok(())
     }
 
     /// Get collection statistics

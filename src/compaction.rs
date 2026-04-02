@@ -205,7 +205,7 @@ pub fn compact_with_deleted_ids(
     }
     
     // Write new segment to temp file
-    let (temp_segment_path, new_segment) = write_segment_temp(&merged_docs, dim, &segments_dir)?;
+    let (temp_segment_path, _new_segment) = write_segment_temp(&merged_docs, dim, &segments_dir)?;
     
     // Build new HNSW index if requested
     let index_rebuilt = if should_rebuild_index {
@@ -249,7 +249,7 @@ pub fn compact_with_deleted_ids(
     manifest.set_last_wal_seq(0); // WAL will be reset
     
     // Save manifest (atomic rename)
-    let manifest_path = collection_path.join("MANIFEST");
+    let manifest_path = collection_path.join(crate::manifest::MANIFEST_FILE_NAME);
     manifest.save(&manifest_path)?;
     
     // Delete old segment files (safe now that manifest is updated)
@@ -308,7 +308,7 @@ pub fn cleanup_temp_files(collection_path: &Path) -> Result<usize> {
     }
     
     // Clean up manifest temp files
-    let manifest_tmp = collection_path.join("MANIFEST.tmp");
+    let manifest_tmp = collection_path.join("meta.json.tmp");
     if manifest_tmp.exists() {
         let _ = std::fs::remove_file(&manifest_tmp);
         cleaned += 1;
@@ -450,7 +450,7 @@ mod tests {
         std::fs::write(segments_dir.join("0001.nvdb.tmp"), b"temp").unwrap();
         std::fs::write(segments_dir.join("0002.nvdb.tmp"), b"temp").unwrap();
         std::fs::write(temp_dir.path().join("index.hnsw.tmp"), b"temp").unwrap();
-        std::fs::write(temp_dir.path().join("MANIFEST.tmp"), b"temp").unwrap();
+        std::fs::write(temp_dir.path().join("meta.json.tmp"), b"temp").unwrap();
         
         // Create a non-temp file that should NOT be deleted
         std::fs::write(segments_dir.join("0001.nvdb"), b"real").unwrap();
@@ -462,7 +462,7 @@ mod tests {
         assert!(!segments_dir.join("0001.nvdb.tmp").exists());
         assert!(!segments_dir.join("0002.nvdb.tmp").exists());
         assert!(!temp_dir.path().join("index.hnsw.tmp").exists());
-        assert!(!temp_dir.path().join("MANIFEST.tmp").exists());
+        assert!(!temp_dir.path().join("meta.json.tmp").exists());
         
         // Verify real file remains
         assert!(segments_dir.join("0001.nvdb").exists());

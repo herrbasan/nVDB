@@ -17,7 +17,13 @@ use nvdb::{Durability, Distance, Search, Filter};
 /// Wraps the Rust Database type and provides JS-friendly methods.
 #[napi]
 pub struct Database {
-    inner: Arc<RustDatabase>,
+    inner: std::sync::RwLock<Option<Arc<RustDatabase>>>,
+}
+
+impl Database {
+    fn inner(&self) -> Result<Arc<RustDatabase>> {
+        self.inner.read().unwrap().clone().ok_or_else(|| Error::from_reason("Database closed"))
+    }
 }
 
 #[napi]
@@ -27,7 +33,7 @@ impl Database {
     pub fn new(path: String) -> Result<Self> {
         let inner = RustDatabase::open(&path)
             .map_err(|e| Error::from_reason(format!("Failed to open database: {}", e)))?;
-        Ok(Self { inner })
+        Ok(Self { inner: std::sync::RwLock::new(Some(inner)) })
     }
 
     /// Create a new collection
@@ -52,41 +58,45 @@ impl Database {
         };
 
         let coll = self
-            .inner
-            .create_collection(&name, config)
+            .inner()?.create_collection(&name, config)
             .map_err(|e| Error::from_reason(format!("Failed to create collection: {}", e)))?;
 
         Ok(Collection {
-            inner: coll,
-            _db: self.inner.clone(),
+            inner: std::sync::RwLock::new(Some(Arc::new(coll))),
+            _db: std::sync::RwLock::new(Some(self.inner()?.clone())),
         })
     }
 
     /// Get an existing collection
+    /// Release the database lock
+    #[napi]
+    pub fn close(&self) -> Result<()> {
+        *self.inner.write().unwrap() = None;
+        Ok(())
+    }
+
     #[napi]
     pub fn get_collection(&self, name: String) -> Result<Collection> {
         let coll = self
-            .inner
-            .get_collection(&name)
+            .inner()?.get_collection(&name)
             .map_err(|e| Error::from_reason(format!("Failed to get collection: {}", e)))?;
 
         Ok(Collection {
-            inner: coll,
-            _db: self.inner.clone(),
+            inner: std::sync::RwLock::new(Some(Arc::new(coll))),
+            _db: std::sync::RwLock::new(Some(self.inner()?.clone())),
         })
     }
 
     /// List all collection names
     #[napi]
-    pub fn list_collections(&self) -> Vec<String> {
-        self.inner.list_collections()
+    pub fn list_collections(&self) -> Result<Vec<String>> {
+        Ok(self.inner()?.list_collections())
     }
 
     /// Drop (delete) a collection
     #[napi]
     pub fn drop_collection(&self, name: String) -> Result<()> {
-        self.inner
-            .drop_collection(&name)
+        self.inner()?.drop_collection(&name)
             .map_err(|e| Error::from_reason(format!("Failed to drop collection: {}", e)))
     }
 }
@@ -117,30 +127,43 @@ pub struct RebuildIndexOptions {
 /// Wraps the Rust Collection type and provides JS-friendly methods.
 #[napi]
 pub struct Collection {
-    inner: RustCollection,
-    // Keep reference to database to prevent premature drop
-    _db: Arc<RustDatabase>,
+    inner: std::sync::RwLock<Option<Arc<RustCollection>>>,
+    _db: std::sync::RwLock<Option<Arc<RustDatabase>>>,
+}
+
+impl Collection {
+    fn inner(&self) -> Result<Arc<RustCollection>> {
+        self.inner.read().unwrap().clone().ok_or_else(|| Error::from_reason("Collection closed"))
+    }
 }
 
 #[napi]
 impl Collection {
     /// Get the collection name
     #[napi(getter)]
-    pub fn name(&self) -> String {
-        self.inner.name().to_string()
+    pub fn name(&self) -> Result<String> {
+        Ok(self.inner()?.name().to_string())
+    }
+
+    /// Release the collection lock
+    #[napi]
+    pub fn close(&self) -> Result<()> {
+        *self.inner.write().unwrap() = None;
+        *self._db.write().unwrap() = None;
+        Ok(())
     }
 
     /// Get the collection configuration
     #[napi(getter)]
-    pub fn config(&self) -> CollectionConfigJs {
-        let config = self.inner.config();
-        CollectionConfigJs {
+    pub fn config(&self) -> Result<CollectionConfigJs> {
+        let config = self.inner()?.config().clone();
+        Ok(CollectionConfigJs {
             dim: config.dim as u32,
             durability: match config.durability {
                 Durability::FdatasyncEachBatch => "sync".to_string(),
                 Durability::Buffered => "buffered".to_string(),
             },
-        }
+        })
     }
 
     /// Insert a single document
@@ -159,8 +182,7 @@ impl Collection {
             payload: payload_json,
         };
 
-        self.inner
-            .insert(doc)
+        self.inner()?.insert(doc)
             .map_err(|e| Error::from_reason(format!("Failed to insert document: {}", e)))?;
 
         Ok(())
@@ -188,8 +210,7 @@ impl Collection {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        self.inner
-            .insert_batch(documents)
+        self.inner()?.insert_batch(documents)
             .map_err(|e| Error::from_reason(format!("Failed to insert batch: {}", e)))?;
 
         Ok(())
@@ -198,9 +219,7 @@ impl Collection {
     /// Get a document by ID
     #[napi]
     pub fn get(&self, id: String) -> Result<Option<DocumentJs>> {
-        let doc = self
-            .inner
-            .get(&id)
+        let doc = self.inner()?.get(&id)
             .map_err(|e| Error::from_reason(format!("Failed to get document: {}", e)))?;
 
         Ok(doc.map(|d| DocumentJs {
@@ -213,8 +232,7 @@ impl Collection {
     /// Delete a document by ID
     #[napi]
     pub fn delete(&self, id: String) -> Result<bool> {
-        self.inner
-            .delete(&id)
+        self.inner()?.delete(&id)
             .map_err(|e| Error::from_reason(format!("Failed to delete document: {}", e)))
     }
 
@@ -251,9 +269,7 @@ impl Collection {
             search = search.filter(filter);
         }
 
-        let results = self
-            .inner
-            .search(&search)
+        let results = self.inner()?.search(&search)
             .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))?;
 
         Ok(results
@@ -269,25 +285,21 @@ impl Collection {
     /// Flush memtable to disk
     #[napi]
     pub fn flush(&self) -> Result<()> {
-        self.inner
-            .flush()
+        self.inner()?.flush()
             .map_err(|e| Error::from_reason(format!("Flush failed: {}", e)))
     }
 
     /// Sync WAL to disk
     #[napi]
     pub fn sync(&self) -> Result<()> {
-        self.inner
-            .sync()
+        self.inner()?.sync()
             .map_err(|e| Error::from_reason(format!("Sync failed: {}", e)))
     }
 
     /// Compact the collection
     #[napi]
     pub fn compact(&self) -> Result<CompactionResultJs> {
-        let result = self
-            .inner
-            .compact()
+        let result = self.inner()?.compact()
             .map_err(|e| Error::from_reason(format!("Compaction failed: {}", e)))?;
 
         Ok(CompactionResultJs {
@@ -302,34 +314,32 @@ impl Collection {
     #[napi]
     pub fn rebuild_index(&self, options: Option<RebuildIndexOptions>) -> Result<()> {
         let (params, distance) = convert_rebuild_options(options)?;
-        self.inner
-            .rebuild_index(params, distance)
+        self.inner()?.rebuild_index(params, distance)
             .map_err(|e| Error::from_reason(format!("Failed to rebuild index: {}", e)))
     }
 
     /// Delete the HNSW index
     #[napi]
     pub fn delete_index(&self) -> Result<()> {
-        self.inner
-            .delete_index()
+        self.inner()?.delete_index()
             .map_err(|e| Error::from_reason(format!("Failed to delete index: {}", e)))
     }
 
     /// Check if HNSW index exists
     #[napi]
-    pub fn has_index(&self) -> bool {
-        self.inner.has_index()
+    pub fn has_index(&self) -> Result<bool> {
+        Ok(self.inner()?.has_index())
     }
 
     /// Get collection statistics
     #[napi(getter)]
-    pub fn stats(&self) -> CollectionStatsJs {
-        let stats = self.inner.stats();
-        CollectionStatsJs {
+    pub fn stats(&self) -> Result<CollectionStatsJs> {
+        let stats = self.inner()?.stats();
+        Ok(CollectionStatsJs {
             memtable_docs: stats.memtable_docs as u32,
             segment_count: stats.segment_count as u32,
             total_segment_docs: stats.total_segment_docs as u32,
-        }
+        })
     }
 }
 
@@ -518,4 +528,5 @@ fn convert_rebuild_options(options: Option<RebuildIndexOptions>) -> Result<(Opti
     });
 
     Ok((params, distance))
+
 }
