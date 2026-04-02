@@ -16,10 +16,13 @@ use crate::error::{Error, Result};
 use crate::CollectionConfig;
 
 /// Manifest file name
-pub const MANIFEST_FILE_NAME: &str = "MANIFEST";
+pub const MANIFEST_FILE_NAME: &str = "meta.json";
+
+/// Manifest legacy file name (for backwards compatibility)
+pub const MANIFEST_LEGACY_NAME: &str = "MANIFEST";
 
 /// Manifest temporary file name (for atomic writes)
-pub const MANIFEST_TEMP_NAME: &str = "MANIFEST.tmp";
+pub const MANIFEST_TEMP_NAME: &str = "meta.json.tmp";
 
 /// Collection manifest.
 ///
@@ -73,20 +76,29 @@ impl Manifest {
     /// Load manifest from a file
     pub fn load(path: impl AsRef<Path>) -> Result<Option<Self>> {
         let path = path.as_ref();
+        
+        let path_to_load = if !path.exists() {
+            let legacy_path = path.with_file_name(MANIFEST_LEGACY_NAME);
+            if legacy_path.exists() {
+                // Return early from a silently recovered legacy state
+                // Next save() will write to new path (meta.json)
+                legacy_path
+            } else {
+                return Ok(None);
+            }
+        } else {
+            path.to_path_buf()
+        };
 
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let mut file = File::open(path)
-            .map_err(Error::io_err(path, "failed to open manifest"))?;
+        let mut file = File::open(&path_to_load)
+            .map_err(Error::io_err(&path_to_load, "failed to open manifest"))?;
 
         let mut contents = Vec::new();
         file.read_to_end(&mut contents)
-            .map_err(Error::io_err(path, "failed to read manifest"))?;
+            .map_err(Error::io_err(&path_to_load, "failed to read manifest"))?;
 
         let manifest: Manifest = serde_json::from_slice(&contents).map_err(|e| {
-            Error::corruption(path, 0, format!("invalid manifest JSON: {}", e))
+            Error::corruption(&path_to_load, 0, format!("invalid manifest JSON: {}", e))
         })?;
 
         // Version check
