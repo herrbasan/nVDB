@@ -128,7 +128,8 @@ struct DatabaseManifest {
 
 impl DatabaseManifest {
     const CURRENT_VERSION: u32 = 1;
-    const FILENAME: &'static str = "MANIFEST";
+    const FILENAME: &'static str = "meta.json";
+    const LEGACY_FILENAME: &'static str = "MANIFEST";
 
     fn new() -> Self {
         Self {
@@ -138,9 +139,14 @@ impl DatabaseManifest {
     }
 
     fn load(path: &Path) -> Result<Option<Self>> {
-        let manifest_path = path.join(Self::FILENAME);
+        let mut manifest_path = path.join(Self::FILENAME);
         if !manifest_path.exists() {
-            return Ok(None);
+            let legacy_path = path.join(Self::LEGACY_FILENAME);
+            if legacy_path.exists() {
+                manifest_path = legacy_path;
+            } else {
+                return Ok(None);
+            }
         }
 
         let contents = fs::read_to_string(&manifest_path)
