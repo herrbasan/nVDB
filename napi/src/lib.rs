@@ -10,7 +10,119 @@ use std::sync::Arc;
 use nvdb::{Database as RustDatabase, Collection as RustCollection, CollectionConfig, Document};
 use nvdb::{Durability, Distance, Search, Filter};
 
-// FilterBuilder is exposed via napi
+// ─── Async Tasks ───────────────────────────────────────────────
+
+pub struct SearchTask {
+    coll: Arc<RustCollection>,
+    options: SearchOptions,
+}
+
+#[napi]
+impl Task for SearchTask {
+    type Output = Vec<nvdb::Match>;
+    type JsValue = Vec<MatchJs>;
+    
+    fn compute(&mut self) -> Result<Self::Output> {
+         let query_f32: Vec<f32> = self.options.vector.iter().map(|v| *v as f32).collect();
+         let mut search = Search::new(&query_f32);
+         if let Some(top_k) = self.options.top_k {
+             search = search.top_k(top_k as usize);
+         }
+         if let Some(distance) = &self.options.distance {
+             let metric = match distance.as_str() {
+                 "dot" => Distance::DotProduct,
+                 "euclidean" => Distance::Euclidean,
+                 _ => Distance::Cosine,
+             };
+             search = search.distance(metric);
+         }
+         if let Some(approximate) = self.options.approximate {
+             search = search.approximate(approximate);
+         }
+         if let Some(ef) = self.options.ef {
+             search = search.ef(ef as usize);
+         }
+         if let Some(filter_json) = &self.options.filter {
+             let filter: Filter = serde_json::from_str(filter_json)
+                 .map_err(|e| Error::from_reason(format!("Invalid filter JSON: {}", e)))?;
+             search = search.filter(filter);
+         }
+         self.coll.search(&search).map_err(|e| Error::from_reason(format!("Search failed: {}", e)))
+    }
+    
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        let results = output.into_iter().map(|m| MatchJs {
+            id: m.id,
+            score: m.score as f64,
+            payload: m.payload.map(|p| serde_json::to_string(&p).unwrap_or_default()),
+        }).collect();
+        Ok(results)
+    }
+}
+
+pub struct CompactTask {
+    coll: Arc<RustCollection>,
+}
+
+#[napi]
+impl Task for CompactTask {
+    type Output = nvdb::CompactionResult;
+    type JsValue = CompactionResultJs;
+    
+    fn compute(&mut self) -> Result<Self::Output> {
+         self.coll.compact().map_err(|e| Error::from_reason(format!("Compact failed: {}", e)))
+    }
+    
+    fn resolve(&mut self, env: Env, result: Self::Output) -> Result<Self::JsValue> {
+        Ok(CompactionResultJs {
+            docs_before: result.docs_before as u32,
+            docs_after: result.docs_after as u32,
+            segments_merged: result.segments_merged as u32,
+            index_rebuilt: result.index_rebuilt,
+        })
+    }
+}
+
+pub struct RebuildIndexTask {
+    coll: Arc<RustCollection>,
+    options: Option<RebuildIndexOptions>,
+}
+
+#[napi]
+impl Task for RebuildIndexTask {
+    type Output = ();
+    type JsValue = ();
+    
+    fn compute(&mut self) -> Result<Self::Output> {
+         let (params, distance) = convert_rebuild_options(self.options.take())?;
+         self.coll.rebuild_index(params, distance).map_err(|e| Error::from_reason(format!("Failed to rebuild index: {}", e)))
+    }
+    
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+pub struct ExportTask {
+    coll: Arc<RustCollection>,
+    dest: std::path::PathBuf,
+}
+
+#[napi]
+impl Task for ExportTask {
+    type Output = ();
+    type JsValue = ();
+    
+    fn compute(&mut self) -> Result<Self::Output> {
+         self.coll.export_snapshot(&self.dest).map_err(|e| Error::from_reason(format!("Export failed: {}", e)))
+    }
+    
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+// ─── Helper for FilterBuilder ─────────────────────────────────
 
 /// Database class for Node.js
 ///
@@ -238,48 +350,11 @@ impl Collection {
 
     /// Search for similar vectors
     #[napi]
-    pub fn search(&self, options: SearchOptions) -> Result<Vec<MatchJs>> {
-        let query_f32: Vec<f32> = options.vector.iter().map(|v| *v as f32).collect();
-        let mut search = Search::new(&query_f32);
-
-        if let Some(top_k) = options.top_k {
-            search = search.top_k(top_k as usize);
-        }
-
-        if let Some(distance) = options.distance {
-            let metric = match distance.as_str() {
-                "dot" => Distance::DotProduct,
-                "euclidean" => Distance::Euclidean,
-                _ => Distance::Cosine,
-            };
-            search = search.distance(metric);
-        }
-
-        if let Some(approximate) = options.approximate {
-            search = search.approximate(approximate);
-        }
-
-        if let Some(ef) = options.ef {
-            search = search.ef(ef as usize);
-        }
-
-        if let Some(filter_json) = options.filter {
-            let filter: Filter = serde_json::from_str(&filter_json)
-                .map_err(|e| Error::from_reason(format!("Invalid filter JSON: {}", e)))?;
-            search = search.filter(filter);
-        }
-
-        let results = self.inner()?.search(&search)
-            .map_err(|e| Error::from_reason(format!("Search failed: {}", e)))?;
-
-        Ok(results
-            .into_iter()
-            .map(|m| MatchJs {
-                id: m.id,
-                score: m.score as f64,
-                payload: m.payload.map(|p| p.to_string()),
-            })
-            .collect())
+    pub fn search(&self, options: SearchOptions) -> Result<AsyncTask<SearchTask>> {
+        Ok(AsyncTask::new(SearchTask {
+            coll: self.inner()?,
+            options,
+        }))
     }
 
     /// Flush memtable to disk
@@ -298,24 +373,19 @@ impl Collection {
 
     /// Compact the collection
     #[napi]
-    pub fn compact(&self) -> Result<CompactionResultJs> {
-        let result = self.inner()?.compact()
-            .map_err(|e| Error::from_reason(format!("Compaction failed: {}", e)))?;
-
-        Ok(CompactionResultJs {
-            docs_before: result.docs_before as u32,
-            docs_after: result.docs_after as u32,
-            segments_merged: result.segments_merged as u32,
-            index_rebuilt: result.index_rebuilt,
-        })
+    pub fn compact(&self) -> Result<AsyncTask<CompactTask>> {
+        Ok(AsyncTask::new(CompactTask {
+            coll: self.inner()?,
+        }))
     }
 
     /// Rebuild the HNSW index with optional parameters
     #[napi]
-    pub fn rebuild_index(&self, options: Option<RebuildIndexOptions>) -> Result<()> {
-        let (params, distance) = convert_rebuild_options(options)?;
-        self.inner()?.rebuild_index(params, distance)
-            .map_err(|e| Error::from_reason(format!("Failed to rebuild index: {}", e)))
+    pub fn rebuild_index(&self, options: Option<RebuildIndexOptions>) -> Result<AsyncTask<RebuildIndexTask>> {
+        Ok(AsyncTask::new(RebuildIndexTask {
+            coll: self.inner()?,
+            options,
+        }))
     }
 
     /// Delete the HNSW index
@@ -329,6 +399,15 @@ impl Collection {
     #[napi]
     pub fn has_index(&self) -> Result<bool> {
         Ok(self.inner()?.has_index())
+    }
+
+    /// Export a consistent snapshot of the collection
+    #[napi]
+    pub fn export_snapshot(&self, dest: String) -> Result<AsyncTask<ExportTask>> {
+        Ok(AsyncTask::new(ExportTask {
+            coll: self.inner()?,
+            dest: std::path::PathBuf::from(dest),
+        }))
     }
 
     /// Get collection statistics
