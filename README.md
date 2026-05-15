@@ -4,6 +4,9 @@
 
 nVDB is an **embedded vector database** with SIMD-accelerated similarity search, optional HNSW approximate search, and MongoDB-like metadata filtering. Standalone embeddable database for Node.js and Rust applications.
 
+> **⚠️ BREAKING CHANGE (v3 Architecture)**
+> nVDB has transitioned to a **Database-as-a-Folder** architecture natively managed in Rust. Collections are now isolated folders containing `meta.json` (dimensionality and schemas) and data structures. Native delta operations like `patchPayload` replace total re-writes, drastically reducing I/O when only updating metadata on vectors.
+
 ## Features
 
 - **SIMD-accelerated search** — AVX2/AVX-512/NEON via the `wide` crate (8-wide `f32x8`)
