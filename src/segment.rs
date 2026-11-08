@@ -1,6 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use memmap2::{Mmap, MmapOptions};
 // use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -436,10 +437,11 @@ pub struct Segment {
     mmap: Mmap,
     /// Pointer to vector data (packed f32s)
     vector_ptr: *const f32,
-    /// Offset to ID mapping in mmap
-    id_mapping_offset: usize,
-    /// Offset to payload data in mmap
-    payload_offset: usize,
+    // Deserializing these tables per document made exact_search quadratic:
+    // every get_external_id/get_payload call parsed every entry in the segment.
+    id_by_internal: HashMap<u32, String>,
+    internal_by_external: HashMap<String, u32>,
+    payload_by_internal: HashMap<u32, Option<String>>,
 }
 
 impl std::fmt::Debug for Segment {
@@ -518,17 +520,29 @@ impl Segment {
             mmap.as_ptr().add(header.vector_offset as usize) as *const f32
         };
 
-        // Deserialize ID mapping via rkyv (zero-copy)
+        // Deserialize lookup tables once per segment, not once per document.
         let id_mapping_offset = header.id_mapping_offset as usize;
         let payload_offset = header.payload_offset as usize;
+        let id_entries = deserialize_id_entries(&mmap[id_mapping_offset..])?;
+        let payload_entries = deserialize_payload_entries(&mmap[payload_offset..])?;
+        let id_by_internal = id_entries.iter()
+            .map(|entry| (entry.internal, entry.external.clone()))
+            .collect();
+        let internal_by_external = id_entries.into_iter()
+            .map(|entry| (entry.external, entry.internal))
+            .collect();
+        let payload_by_internal = payload_entries.into_iter()
+            .map(|entry| (entry.internal_id, entry.payload))
+            .collect();
 
         Ok(Arc::new(Self {
             path: path.to_path_buf(),
             header,
             mmap,
             vector_ptr,
-            id_mapping_offset,
-            payload_offset,
+            id_by_internal,
+            internal_by_external,
+            payload_by_internal,
         }))
     }
 
@@ -579,33 +593,19 @@ impl Segment {
 
     /// Get external ID for an internal ID.
     pub fn get_external_id(&self, internal_id: u32) -> Option<String> {
-        let id_mapping_data = &self.mmap[self.id_mapping_offset..];
-        let entries = deserialize_id_entries(id_mapping_data).ok()?;
-        entries
-            .into_iter()
-            .find(|entry| entry.internal == internal_id)
-            .map(|entry| entry.external)
+        self.id_by_internal.get(&internal_id).cloned()
     }
 
     /// Get internal ID for an external ID.
     pub fn get_internal_id(&self, external_id: &str) -> Option<u32> {
-        let id_mapping_data = &self.mmap[self.id_mapping_offset..];
-        let entries = deserialize_id_entries(id_mapping_data).ok()?;
-        entries
-            .into_iter()
-            .find(|entry| entry.external == external_id)
-            .map(|entry| entry.internal)
+        self.internal_by_external.get(external_id).copied()
     }
 
     /// Get payload for an internal ID.
     pub fn get_payload(&self, internal_id: u32) -> Option<serde_json::Value> {
-        let payload_data = &self.mmap[self.payload_offset..];
-        let entries = deserialize_payload_entries(payload_data).ok()?;
-        entries
-            .into_iter()
-            .find(|entry| entry.internal_id == internal_id)
-            .and_then(|entry| entry.payload)
-            .and_then(|p| serde_json::from_str(&p).ok())
+        self.payload_by_internal.get(&internal_id)
+            .and_then(|payload| payload.as_ref())
+            .and_then(|p| serde_json::from_str(p).ok())
     }
 
     /// Iterate over all (internal_id, external_id, vector) tuples.
