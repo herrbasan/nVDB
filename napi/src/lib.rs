@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 use nvdb::{Database as RustDatabase, Collection as RustCollection, CollectionConfig, Document};
 use nvdb::{Durability, Distance, Search, Filter, HybridSearch, LexicalField};
+#[cfg(feature = "rerank-onnx")]
+use nvdb::{OnnxReranker, OnnxRerankerConfig};
+#[cfg(feature = "rerank-onnx")]
+use nvdb::Reranker as NvdbReranker;
 
 // ─── Async Tasks ───────────────────────────────────────────────
 
@@ -115,6 +119,8 @@ impl Task for HybridSearchTask {
             .map(|m| HybridMatchJs {
                 id: m.id,
                 score: m.score as f64,
+                rrf_score: m.rrf_score as f64,
+                rerank_score: m.rerank_score.map(|score| score as f64),
                 vector_score: m.vector_score.map(|score| score as f64),
                 lexical_score: m.lexical_score.map(|score| score as f64),
                 vector_rank: m.vector_rank.map(|rank| rank as u32),
@@ -122,6 +128,154 @@ impl Task for HybridSearchTask {
                 payload: m.payload.map(|p| serde_json::to_string(&p).unwrap_or_default()),
             })
             .collect())
+    }
+}
+
+#[cfg(feature = "rerank-onnx")]
+pub struct RerankTask {
+    reranker: std::sync::Arc<OnnxReranker>,
+    query: String,
+    documents: Vec<String>,
+}
+
+#[cfg(feature = "rerank-onnx")]
+#[napi]
+impl Task for RerankTask {
+    type Output = Vec<f32>;
+    type JsValue = Vec<f64>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let documents: Vec<&str> = self.documents.iter().map(String::as_str).collect();
+        self.reranker
+            .score(&self.query, &documents)
+            .map_err(|error| Error::from_reason(format!("Rerank failed: {error}")))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_iter().map(|score| score as f64).collect())
+    }
+}
+
+#[cfg(feature = "rerank-onnx")]
+pub struct HybridRerankTask {
+    coll: Arc<RustCollection>,
+    options: HybridSearchOptions,
+    reranker: std::sync::Arc<OnnxReranker>,
+    text_field: String,
+    rerank_weight: f32,
+    shortlist: usize,
+}
+
+#[cfg(feature = "rerank-onnx")]
+#[napi]
+impl Task for HybridRerankTask {
+    type Output = Vec<nvdb::HybridMatch>;
+    type JsValue = Vec<HybridMatchJs>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let vector_f32: Vec<f32> = self.options.vector.iter().map(|v| *v as f32).collect();
+        let mut search = HybridSearch::new(&vector_f32, &self.options.text);
+        if let Some(top_k) = self.options.top_k {
+            search = search.top_k(top_k as usize);
+        }
+        if let Some(candidate_k) = self.options.candidate_k {
+            search = search.candidate_k(candidate_k as usize);
+        }
+        if let Some(distance) = &self.options.distance {
+            let metric = match distance.as_str() {
+                "dot" => Distance::DotProduct,
+                "euclidean" => Distance::Euclidean,
+                _ => Distance::Cosine,
+            };
+            search = search.distance(metric);
+        }
+        if let Some(filter_json) = &self.options.filter {
+            let filter: Filter = serde_json::from_str(filter_json)
+                .map_err(|e| Error::from_reason(format!("Invalid filter JSON: {}", e)))?;
+            search = search.filter(filter);
+        }
+        if let Some(rrf_k) = self.options.rrf_k {
+            search = search.rrf_k(rrf_k as usize);
+        }
+        search = search.lane_weights(
+            self.options.vector_weight.unwrap_or(1.0) as f32,
+            self.options.lexical_weight.unwrap_or(1.0) as f32,
+        );
+        if let Some(group_by) = &self.options.group_by {
+            search = search.diversity(group_by, self.options.max_per_document.unwrap_or(3) as usize);
+        }
+        self.coll
+            .hybrid_search_reranked(
+                &search,
+                self.reranker.as_ref(),
+                &self.text_field,
+                self.rerank_weight,
+                self.shortlist,
+            )
+            .map_err(|error| Error::from_reason(format!("Hybrid rerank failed: {error}")))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(|m| HybridMatchJs {
+                id: m.id,
+                score: m.score as f64,
+                rrf_score: m.rrf_score as f64,
+                rerank_score: m.rerank_score.map(|score| score as f64),
+                vector_score: m.vector_score.map(|score| score as f64),
+                lexical_score: m.lexical_score.map(|score| score as f64),
+                vector_rank: m.vector_rank.map(|rank| rank as u32),
+                lexical_rank: m.lexical_rank.map(|rank| rank as u32),
+                payload: m.payload.map(|p| serde_json::to_string(&p).unwrap_or_default()),
+            })
+            .collect())
+    }
+}
+
+#[cfg(feature = "rerank-onnx")]
+#[napi]
+pub struct Reranker {
+    inner: std::sync::Arc<OnnxReranker>,
+}
+
+#[cfg(feature = "rerank-onnx")]
+#[napi(object)]
+pub struct OnnxRerankerOptions {
+    pub model_path: String,
+    pub tokenizer_path: String,
+    pub max_length: Option<u32>,
+    pub batch_size: Option<u32>,
+    pub intra_threads: Option<u32>,
+}
+
+#[cfg(feature = "rerank-onnx")]
+#[napi]
+impl Reranker {
+    #[napi(constructor)]
+    pub fn new(options: OnnxRerankerOptions) -> Result<Self> {
+        let mut config = OnnxRerankerConfig::new(options.model_path, options.tokenizer_path);
+        if let Some(max_length) = options.max_length {
+            config.max_length = max_length as usize;
+        }
+        if let Some(batch_size) = options.batch_size {
+            config.batch_size = batch_size as usize;
+        }
+        config.intra_threads = options.intra_threads.map(|threads| threads as usize);
+        let reranker = OnnxReranker::load(config)
+            .map_err(|error| Error::from_reason(format!("Failed to load reranker: {error}")))?;
+        Ok(Self {
+            inner: std::sync::Arc::new(reranker),
+        })
+    }
+
+    #[napi]
+    pub fn score(&self, query: String, documents: Vec<String>) -> AsyncTask<RerankTask> {
+        AsyncTask::new(RerankTask {
+            reranker: self.inner.clone(),
+            query,
+            documents,
+        })
     }
 }
 
@@ -468,6 +622,27 @@ impl Collection {
         }))
     }
 
+    /// Hybrid search followed by an optional ONNX reranker
+    #[cfg(feature = "rerank-onnx")]
+    #[napi]
+    pub fn hybrid_search_reranked(
+        &self,
+        options: HybridSearchOptions,
+        reranker: &Reranker,
+        text_field: String,
+        rerank_weight: Option<f64>,
+        shortlist: Option<u32>,
+    ) -> Result<AsyncTask<HybridRerankTask>> {
+        Ok(AsyncTask::new(HybridRerankTask {
+            coll: self.inner()?,
+            options,
+            reranker: reranker.inner.clone(),
+            text_field,
+            rerank_weight: rerank_weight.unwrap_or(nvdb::DEFAULT_RERANK_WEIGHT as f64) as f32,
+            shortlist: shortlist.unwrap_or(nvdb::DEFAULT_RERANK_SHORTLIST as u32) as usize,
+        }))
+    }
+
     /// Flush memtable to disk
     #[napi]
     pub fn flush(&self) -> Result<()> {
@@ -597,6 +772,8 @@ pub struct HybridSearchOptions {
 pub struct HybridMatchJs {
     pub id: String,
     pub score: f64,
+    pub rrf_score: f64,
+    pub rerank_score: Option<f64>,
     pub vector_score: Option<f64>,
     pub lexical_score: Option<f64>,
     pub vector_rank: Option<u32>,

@@ -2,6 +2,12 @@
 
 Native Node.js bindings for nVDB - a high-performance embedded vector database.
 
+Optional reranking requires building the binding with `--features rerank-onnx`:
+
+```bash
+cargo build --release -p nvdb-node --features rerank-onnx
+```
+
 ## Installation via Git Submodule
 
 ```bash
@@ -65,6 +71,31 @@ const hybrid = await collection.hybridSearch({
   maxPerDocument: 3
 });
 // [{ id, score, vectorScore, lexicalScore, vectorRank, lexicalRank, payload }]
+
+// Optional ONNX reranker (build with --features rerank-onnx)
+const { Reranker } = require('./nVDB/napi');
+const reranker = new Reranker({
+  modelPath: '/models/reranker/model.onnx',
+  tokenizerPath: '/models/reranker/tokenizer.json',
+  maxLength: 112,
+  batchSize: 10
+});
+
+const reranked = await collection.hybridSearchReranked(
+  {
+    vector: new Array(1536).fill(0.15),
+    text: 'Consciousness Is the Record',
+    topK: 10,
+    candidateK: 100,
+    groupBy: 'path',
+    maxPerDocument: 2
+  },
+  reranker,
+  'content', // payload field containing candidate text
+  0.2,       // blend weight
+  10         // rerank top 10
+);
+// [{ id, score, rrfScore, rerankScore, vectorScore, lexicalScore, ... }]
 ```
 
 ## Build Configuration
@@ -150,6 +181,15 @@ const hybrid = await collection.hybridSearch({
   maxPerDocument: 3
 });
 
+// Hybrid search + optional reranker
+const reranked = await collection.hybridSearchReranked(
+  { vector: queryVector, text: 'exact title', topK: 10, candidateK: 100 },
+  reranker,
+  'content',
+  0.2,
+  10
+);
+
 // Maintenance
 collection.flush();        // Flush memtable to disk
 collection.sync();         // Force WAL sync
@@ -163,6 +203,25 @@ collection.name;   // Collection name
 collection.config; // { dim, durability, lexicalFields }
 collection.stats;  // { memtableDocs, segmentCount, totalSegmentDocs }
 ```
+
+### Reranker
+
+Only available when the native binding was built with `rerank-onnx`.
+
+```javascript
+const reranker = new Reranker({
+  modelPath: '/models/reranker/model.onnx',
+  tokenizerPath: '/models/reranker/tokenizer.json',
+  maxLength: 112,
+  batchSize: 10,
+  intraThreads: undefined
+});
+
+const scores = await reranker.score('query', ['document one', 'document two']);
+```
+
+The model and tokenizer are external artifacts. Loading fails loudly when a
+path, licence-cleared artifact or ONNX Runtime dependency is missing.
 
 ### FilterBuilder
 

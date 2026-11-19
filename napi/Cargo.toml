@@ -13,6 +13,10 @@ rust-version = "1.75"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = []
+rerank-onnx = ["nvdb/rerank-onnx"]
+
 [dependencies]
 # napi-rs for Node.js bindings
 napi = { version = "2.16", default-features = false, features = ["napi8", "serde-json", "tokio_rt"] }
