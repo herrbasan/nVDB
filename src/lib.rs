@@ -768,9 +768,9 @@ impl Collection {
 
     /// Rerank the top of a hybrid result set with a query-document model.
     ///
-    /// Only the first `shortlist` candidates are scored. The final score blends
-    /// normalized RRF and reranker scores; original RRF remains in
-    /// [`HybridMatch::rrf_score`].
+    /// Only the first `shortlist` candidates are scored. Hybrid order and
+    /// reranker order are combined by weighted reciprocal-rank fusion; original
+    /// hybrid score remains in [`HybridMatch::rrf_score`].
     pub fn hybrid_search_reranked(
         &self,
         hybrid: &HybridSearch<'_>,
@@ -830,33 +830,24 @@ impl Collection {
             ));
         }
 
-        let min_rrf = results[..count]
-            .iter()
-            .map(|result| result.score)
-            .fold(f32::INFINITY, f32::min);
-        let max_rrf = results[..count]
-            .iter()
-            .map(|result| result.score)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_rerank = rerank_scores.iter().copied().fold(f32::INFINITY, f32::min);
-        let max_rerank = rerank_scores
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let mut rerank_order: Vec<usize> = (0..count).collect();
+        rerank_order.sort_by(|left, right| {
+            rerank_scores[*right]
+                .partial_cmp(&rerank_scores[*left])
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| results[*left].id.cmp(&results[*right].id))
+        });
+        let mut rerank_rank = vec![0usize; count];
+        for (position, index) in rerank_order.into_iter().enumerate() {
+            rerank_rank[index] = position + 1;
+        }
 
+        let rrf_k = DEFAULT_RRF_K as f32;
         for (index, result) in results[..count].iter_mut().enumerate() {
-            let rrf = if max_rrf > min_rrf {
-                (result.score - min_rrf) / (max_rrf - min_rrf)
-            } else {
-                0.5
-            };
-            let rerank = if max_rerank > min_rerank {
-                (rerank_scores[index] - min_rerank) / (max_rerank - min_rerank)
-            } else {
-                0.5
-            };
+            let hybrid_rank = index + 1;
             result.rerank_score = Some(rerank_scores[index]);
-            result.score = (1.0 - rerank_weight) * rrf + rerank_weight * rerank;
+            result.score = (1.0 - rerank_weight) / (rrf_k + hybrid_rank as f32)
+                + rerank_weight / (rrf_k + rerank_rank[index] as f32);
         }
 
         let mut ordered = results[..count].to_vec();

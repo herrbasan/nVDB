@@ -310,10 +310,10 @@ let results = collection.hybrid_search_reranked(
 )?;
 ```
 
-Only the shortlist is reranked. The final score blends normalized RRF and
-reranker scores; `rrf_score` and `rerank_score` retain both diagnostics. The
-model and tokenizer are external artifacts, and the default nVDB build has no
-ONNX dependency.
+Only the shortlist is reranked. Hybrid and reranker orders are combined by
+weighted reciprocal-rank fusion; `rrf_score` and `rerank_score` retain both
+diagnostics. The model and tokenizer are external artifacts, and the default
+nVDB build has no ONNX dependency.
 
 ### Index Management
 
