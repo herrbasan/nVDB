@@ -29,7 +29,12 @@ const db = new Database('./data');
 
 // Create collection for 1536-dim embeddings (OpenAI, etc.)
 const collection = db.createCollection('documents', 1536, {
-  durability: 'sync'  // 'sync' or 'buffered'
+  durability: 'sync',  // 'sync' or 'buffered'
+  lexicalFields: [
+    { field: 'title', weight: 3 },
+    { field: 'path', weight: 2 },
+    { field: 'body', weight: 1 }
+  ]
 });
 
 // Insert documents
@@ -49,6 +54,17 @@ const results = collection.search({
 
 console.log(results);
 // [{ id: 'doc1', score: 0.95, payload: '{"title":"Hello"}' }]
+
+// Hybrid: dense + native BM25, fused by Reciprocal Rank Fusion
+const hybrid = await collection.hybridSearch({
+  vector: new Array(1536).fill(0.15),
+  text: 'Consciousness Is the Record',
+  topK: 10,
+  candidateK: 100,
+  groupBy: 'path',
+  maxPerDocument: 3
+});
+// [{ id, score, vectorScore, lexicalScore, vectorRank, lexicalRank, payload }]
 ```
 
 ## Build Configuration
@@ -106,6 +122,7 @@ collection.insertBatch([{ id, vector, payload }, ...]);
 
 // Retrieve/Delete
 const doc = collection.get(id);
+const ids = collection.documentIds();
 const deleted = collection.delete(id);
 
 // Search
@@ -118,6 +135,21 @@ const results = collection.search({
   filter: FilterBuilder.eq('category', 'books')
 });
 
+// Hybrid search
+const hybrid = await collection.hybridSearch({
+  vector: queryVector,
+  text: 'exact title or identifier',
+  topK: 10,
+  candidateK: 100,
+  distance: 'cosine',
+  filter: FilterBuilder.eq('category', 'books'),
+  rrfK: 60,
+  vectorWeight: 1,
+  lexicalWeight: 1,
+  groupBy: 'path',
+  maxPerDocument: 3
+});
+
 // Maintenance
 collection.flush();        // Flush memtable to disk
 collection.sync();         // Force WAL sync
@@ -128,7 +160,7 @@ collection.hasIndex();     // Check if index exists
 
 // Properties
 collection.name;   // Collection name
-collection.config; // { dim, durability }
+collection.config; // { dim, durability, lexicalFields }
 collection.stats;  // { memtableDocs, segmentCount, totalSegmentDocs }
 ```
 

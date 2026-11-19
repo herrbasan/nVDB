@@ -188,6 +188,176 @@ impl<'a> Search<'a> {
     }
 }
 
+/// Reciprocal Rank Fusion parameter. Larger values flatten rank differences.
+pub const DEFAULT_RRF_K: usize = 60;
+/// Default candidate depth per lane when callers ask for a small top-K.
+pub const DEFAULT_CANDIDATE_MULTIPLIER: usize = 10;
+
+/// Hybrid dense + lexical query.
+#[derive(Debug, Clone)]
+pub struct HybridSearch<'a> {
+    vector: &'a [f32],
+    text: &'a str,
+    top_k: usize,
+    candidate_k: Option<usize>,
+    distance: Distance,
+    filter: Option<Filter>,
+    rrf_k: usize,
+    vector_weight: f32,
+    lexical_weight: f32,
+    group_by: Option<String>,
+    max_per_document: usize,
+}
+
+impl<'a> HybridSearch<'a> {
+    /// Create a hybrid query from a dense vector and lexical query text.
+    pub fn new(vector: &'a [f32], text: &'a str) -> Self {
+        Self {
+            vector,
+            text,
+            top_k: 10,
+            candidate_k: None,
+            distance: Distance::Cosine,
+            filter: None,
+            rrf_k: DEFAULT_RRF_K,
+            vector_weight: 1.0,
+            lexical_weight: 1.0,
+            group_by: None,
+            max_per_document: 3,
+        }
+    }
+
+    /// Final result count.
+    pub fn top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+
+    /// Candidate depth fetched independently from each lane.
+    pub fn candidate_k(mut self, candidate_k: usize) -> Self {
+        self.candidate_k = Some(candidate_k);
+        self
+    }
+
+    /// Dense distance metric.
+    pub fn distance(mut self, distance: Distance) -> Self {
+        self.distance = distance;
+        self
+    }
+
+    /// Metadata filter applied to both lanes.
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Reciprocal Rank Fusion parameter.
+    pub fn rrf_k(mut self, rrf_k: usize) -> Self {
+        assert!(rrf_k > 0, "hybrid search rrf_k must be positive");
+        self.rrf_k = rrf_k;
+        self
+    }
+
+    /// Lane weights applied before fusion.
+    pub fn lane_weights(mut self, vector_weight: f32, lexical_weight: f32) -> Self {
+        assert!(
+            vector_weight.is_finite() && vector_weight >= 0.0,
+            "hybrid vector weight must be finite and non-negative"
+        );
+        assert!(
+            lexical_weight.is_finite() && lexical_weight >= 0.0,
+            "hybrid lexical weight must be finite and non-negative"
+        );
+        self.vector_weight = vector_weight;
+        self.lexical_weight = lexical_weight;
+        self
+    }
+
+    /// Limit how many chunks one payload group may contribute. `field` is a
+    /// dotted payload path; missing fields fall back to the document ID.
+    pub fn diversity(mut self, field: impl Into<String>, max_per_document: usize) -> Self {
+        assert!(max_per_document > 0, "max_per_document must be positive");
+        self.group_by = Some(field.into());
+        self.max_per_document = max_per_document;
+        self
+    }
+
+    /// Query vector.
+    pub fn vector(&self) -> &[f32] {
+        self.vector
+    }
+
+    /// Lexical query text.
+    pub fn text(&self) -> &str {
+        self.text
+    }
+
+    /// Final result count.
+    pub fn top_k_value(&self) -> usize {
+        self.top_k
+    }
+
+    /// Candidate depth fetched from each lane.
+    pub fn candidate_k_value(&self) -> usize {
+        self.candidate_k
+            .unwrap_or_else(|| self.top_k.saturating_mul(DEFAULT_CANDIDATE_MULTIPLIER))
+            .max(self.top_k)
+    }
+
+    /// Dense distance metric.
+    pub fn distance_metric(&self) -> Distance {
+        self.distance
+    }
+
+    /// Metadata filter.
+    pub fn filter_ref(&self) -> Option<&Filter> {
+        self.filter.as_ref()
+    }
+
+    /// RRF parameter.
+    pub fn rrf_k_value(&self) -> usize {
+        self.rrf_k
+    }
+
+    /// Lane weights.
+    pub fn lane_weights_value(&self) -> (f32, f32) {
+        (self.vector_weight, self.lexical_weight)
+    }
+
+    /// Payload field used for per-document diversity.
+    pub fn group_by_ref(&self) -> Option<&str> {
+        self.group_by.as_deref()
+    }
+
+    /// Maximum chunks retained per group.
+    pub fn max_per_document_value(&self) -> usize {
+        self.max_per_document
+    }
+}
+
+/// Hybrid result with fused score and both lane diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HybridMatch {
+    /// External document ID.
+    pub id: String,
+    /// Fused RRF score.
+    pub score: f32,
+    /// Original RRF score before reranking.
+    pub rrf_score: f32,
+    /// Raw dense similarity, when present in the dense lane.
+    pub vector_score: Option<f32>,
+    /// Raw BM25 score, when present in the lexical lane.
+    pub lexical_score: Option<f32>,
+    /// One-based dense rank.
+    pub vector_rank: Option<usize>,
+    /// One-based lexical rank.
+    pub lexical_rank: Option<usize>,
+    /// Optional query-document reranker score.
+    pub rerank_score: Option<f32>,
+    /// Current document payload.
+    pub payload: Option<serde_json::Value>,
+}
+
 /// A search result match.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Match {

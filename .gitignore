@@ -30,3 +30,8 @@ Thumbs.db
 
 # rustup-init.exe (downloaded tool)
 rustup-init.exe
+
+# Reranker model artifacts (large, provisioned separately)
+/models/reranker/**/*.onnx
+/models/reranker/**/tokenizer*.json
+!/models/reranker/README.md

@@ -8,7 +8,7 @@ use napi_derive::napi;
 use std::sync::Arc;
 
 use nvdb::{Database as RustDatabase, Collection as RustCollection, CollectionConfig, Document};
-use nvdb::{Durability, Distance, Search, Filter};
+use nvdb::{Durability, Distance, Search, Filter, HybridSearch, LexicalField};
 
 // ─── Async Tasks ───────────────────────────────────────────────
 
@@ -57,6 +57,71 @@ impl Task for SearchTask {
             payload: m.payload.map(|p| serde_json::to_string(&p).unwrap_or_default()),
         }).collect();
         Ok(results)
+    }
+}
+
+pub struct HybridSearchTask {
+    coll: Arc<RustCollection>,
+    options: HybridSearchOptions,
+}
+
+#[napi]
+impl Task for HybridSearchTask {
+    type Output = Vec<nvdb::HybridMatch>;
+    type JsValue = Vec<HybridMatchJs>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let vector_f32: Vec<f32> = self.options.vector.iter().map(|v| *v as f32).collect();
+        let mut search = HybridSearch::new(&vector_f32, &self.options.text);
+        if let Some(top_k) = self.options.top_k {
+            search = search.top_k(top_k as usize);
+        }
+        if let Some(candidate_k) = self.options.candidate_k {
+            search = search.candidate_k(candidate_k as usize);
+        }
+        if let Some(distance) = &self.options.distance {
+            let metric = match distance.as_str() {
+                "dot" => Distance::DotProduct,
+                "euclidean" => Distance::Euclidean,
+                _ => Distance::Cosine,
+            };
+            search = search.distance(metric);
+        }
+        if let Some(filter_json) = &self.options.filter {
+            let filter: Filter = serde_json::from_str(filter_json)
+                .map_err(|e| Error::from_reason(format!("Invalid filter JSON: {}", e)))?;
+            search = search.filter(filter);
+        }
+        if let Some(rrf_k) = self.options.rrf_k {
+            search = search.rrf_k(rrf_k as usize);
+        }
+        let vector_weight = self.options.vector_weight.unwrap_or(1.0) as f32;
+        let lexical_weight = self.options.lexical_weight.unwrap_or(1.0) as f32;
+        search = search.lane_weights(vector_weight, lexical_weight);
+        if let Some(group_by) = &self.options.group_by {
+            search = search.diversity(
+                group_by,
+                self.options.max_per_document.unwrap_or(3) as usize,
+            );
+        }
+        self.coll
+            .hybrid_search(&search)
+            .map_err(|e| Error::from_reason(format!("Hybrid search failed: {}", e)))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output
+            .into_iter()
+            .map(|m| HybridMatchJs {
+                id: m.id,
+                score: m.score as f64,
+                vector_score: m.vector_score.map(|score| score as f64),
+                lexical_score: m.lexical_score.map(|score| score as f64),
+                vector_rank: m.vector_rank.map(|rank| rank as u32),
+                lexical_rank: m.lexical_rank.map(|rank| rank as u32),
+                payload: m.payload.map(|p| serde_json::to_string(&p).unwrap_or_default()),
+            })
+            .collect())
     }
 }
 
@@ -157,16 +222,31 @@ impl Database {
         options: Option<CollectionOptions>,
     ) -> Result<Collection> {
         let durability = options
-            .and_then(|o| o.durability)
+            .as_ref()
+            .and_then(|o| o.durability.as_ref())
             .map(|d| match d.as_str() {
                 "sync" => Durability::FdatasyncEachBatch,
                 _ => Durability::Buffered,
+            })
+            .unwrap_or_default();
+        let lexical_fields = options
+            .as_ref()
+            .and_then(|o| o.lexical_fields.as_ref())
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|field| {
+                        LexicalField::new(field.field.clone())
+                            .with_weight(field.weight.unwrap_or(1.0) as f32)
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
         let config = CollectionConfig {
             dim: dimension as usize,
             durability,
+            lexical_fields,
         };
 
         let coll = self
@@ -217,6 +297,14 @@ impl Database {
 #[napi(object)]
 pub struct CollectionOptions {
     pub durability: Option<String>,
+    pub lexical_fields: Option<Vec<LexicalFieldJs>>,
+}
+
+/// Payload field indexed for lexical/BM25 retrieval
+#[napi(object)]
+pub struct LexicalFieldJs {
+    pub field: String,
+    pub weight: Option<f64>,
 }
 
 /// HNSW index parameters
@@ -275,6 +363,14 @@ impl Collection {
                 Durability::FdatasyncEachBatch => "sync".to_string(),
                 Durability::Buffered => "buffered".to_string(),
             },
+            lexical_fields: config
+                .lexical_fields
+                .iter()
+                .map(|field| LexicalFieldJs {
+                    field: field.field.clone(),
+                    weight: Some(field.weight as f64),
+                })
+                .collect(),
         })
     }
 
@@ -341,6 +437,12 @@ impl Collection {
         }))
     }
 
+    /// List active document IDs
+    #[napi]
+    pub fn document_ids(&self) -> Result<Vec<String>> {
+        Ok(self.inner()?.document_ids())
+    }
+
     /// Delete a document by ID
     #[napi]
     pub fn delete(&self, id: String) -> Result<bool> {
@@ -352,6 +454,15 @@ impl Collection {
     #[napi]
     pub fn search(&self, options: SearchOptions) -> Result<AsyncTask<SearchTask>> {
         Ok(AsyncTask::new(SearchTask {
+            coll: self.inner()?,
+            options,
+        }))
+    }
+
+    /// Search dense and lexical lanes, fused by Reciprocal Rank Fusion
+    #[napi]
+    pub fn hybrid_search(&self, options: HybridSearchOptions) -> Result<AsyncTask<HybridSearchTask>> {
+        Ok(AsyncTask::new(HybridSearchTask {
             coll: self.inner()?,
             options,
         }))
@@ -427,6 +538,7 @@ impl Collection {
 pub struct CollectionConfigJs {
     pub dim: u32,
     pub durability: String,
+    pub lexical_fields: Vec<LexicalFieldJs>,
 }
 
 /// Document for insertion
@@ -461,6 +573,34 @@ pub struct SearchOptions {
 pub struct MatchJs {
     pub id: String,
     pub score: f64,
+    pub payload: Option<String>,
+}
+
+/// Hybrid dense + lexical search options
+#[napi(object)]
+pub struct HybridSearchOptions {
+    pub vector: Vec<f64>,
+    pub text: String,
+    pub top_k: Option<u32>,
+    pub candidate_k: Option<u32>,
+    pub distance: Option<String>,
+    pub filter: Option<String>,
+    pub rrf_k: Option<u32>,
+    pub vector_weight: Option<f64>,
+    pub lexical_weight: Option<f64>,
+    pub group_by: Option<String>,
+    pub max_per_document: Option<u32>,
+}
+
+/// Hybrid search result with lane diagnostics
+#[napi(object)]
+pub struct HybridMatchJs {
+    pub id: String,
+    pub score: f64,
+    pub vector_score: Option<f64>,
+    pub lexical_score: Option<f64>,
+    pub vector_rank: Option<u32>,
+    pub lexical_rank: Option<u32>,
     pub payload: Option<String>,
 }
 

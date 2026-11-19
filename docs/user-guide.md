@@ -238,6 +238,83 @@ let filter = Filter::and(vec![
 ]);
 ```
 
+### Hybrid Retrieval
+
+Declare lexical payload fields when creating the collection:
+
+```rust
+use nvdb::{CollectionConfig, HybridSearch, LexicalField};
+
+let config = CollectionConfig::new(768).with_lexical_fields(vec![
+    LexicalField::new("title").with_weight(3.0),
+    LexicalField::new("path").with_weight(2.0),
+    LexicalField::new("body"),
+]);
+let collection = db.create_collection("documents", config)?;
+```
+
+Search both lanes and fuse by Reciprocal Rank Fusion:
+
+```rust
+let results = collection.hybrid_search(
+    &HybridSearch::new(&query_vector, "exact words and identifiers")
+        .top_k(10)
+        .candidate_k(100)        // wide recall before truncation
+        .lane_weights(1.0, 1.0)
+        .diversity("path", 3),   // max 3 chunks per document
+)?;
+
+for hit in results {
+    println!(
+        "{} fused={:.4} dense={:?} lexical={:?} ranks=({:?}, {:?})",
+        hit.id,
+        hit.score,
+        hit.vector_score,
+        hit.lexical_score,
+        hit.vector_rank,
+        hit.lexical_rank,
+    );
+}
+```
+
+- Lexical fields support dotted payload paths and per-field weights.
+- The BM25 index is rebuilt from active payloads on collection open.
+- Insert, update and delete keep both the vector and lexical indexes current.
+- Filters apply to both lanes.
+- Fused scores are RRF ranks, not cosine probabilities.
+- `hybrid_search` is the candidate stage. A query-document reranker can then score the shortlist.
+
+#### Optional ONNX reranker
+
+```toml
+nvdb = { version = "0.1", features = ["rerank-onnx"] }
+```
+
+```rust
+use nvdb::{OnnxReranker, OnnxRerankerConfig};
+
+let reranker = OnnxReranker::load(OnnxRerankerConfig::new(
+    "/models/reranker.onnx",
+    "/models/tokenizer.json",
+))?;
+
+let results = collection.hybrid_search_reranked(
+    &HybridSearch::new(&query_vector, "exact words and identifiers")
+        .top_k(10)
+        .candidate_k(200)
+        .diversity("path", 2),
+    &reranker,
+    "content",
+    0.2,
+    10,
+)?;
+```
+
+Only the shortlist is reranked. The final score blends normalized RRF and
+reranker scores; `rrf_score` and `rerank_score` retain both diagnostics. The
+model and tokenizer are external artifacts, and the default nVDB build has no
+ONNX dependency.
+
 ### Index Management
 
 ```rust

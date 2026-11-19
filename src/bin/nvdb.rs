@@ -101,6 +101,7 @@ fn handle_init(args: &[String]) {
     let config = nvdb::CollectionConfig {
         dim: dim as usize,
         durability: nvdb::Durability::Buffered,
+        lexical_fields: Vec::new(),
     };
 
     if let Err(e) = db.create_collection(&name, config) {

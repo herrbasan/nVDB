@@ -20,6 +20,7 @@
 //! let collection = db.create_collection("embeddings", CollectionConfig {
 //!     dim: 768,
 //!     durability: Durability::FdatasyncEachBatch,
+//!     lexical_fields: Vec::new(),
 //! })?;
 //!
 //! // Insert a document
@@ -44,9 +45,13 @@ pub mod error;
 pub mod filter;
 pub mod hnsw;
 pub mod id;
+pub mod lexical;
 pub mod lock;
 pub mod manifest;
 pub mod memtable;
+pub mod rerank;
+#[cfg(feature = "rerank-onnx")]
+pub mod rerank_onnx;
 pub mod search;
 pub mod segment;
 pub mod wal;
@@ -57,10 +62,15 @@ pub use error::{Error, Result};
 pub use filter::Filter;
 pub use hnsw::{HnswIndex, HnswParams};
 pub use id::IdMapping;
-pub use lock::CollectionLock;
-pub use manifest::{Manifest, SegmentEntry};
+pub use lexical::{tokenize, LexicalHit, LexicalIndex};
+pub use lock::CollectionLock;pub use manifest::{Manifest, SegmentEntry};
 pub use memtable::Memtable;
-pub use search::{Match, Search, exact_search};
+pub use rerank::{Reranker, DEFAULT_RERANK_SHORTLIST, DEFAULT_RERANK_WEIGHT};
+#[cfg(feature = "rerank-onnx")]
+pub use rerank_onnx::{OnnxReranker, OnnxRerankerConfig};
+pub use search::{
+    exact_search, HybridMatch, HybridSearch, Match, Search, DEFAULT_RRF_K,
+};
 pub use segment::{Document, Segment, SegmentBuilder, SegmentHeader};
 pub use wal::{Wal, WAL_FLUSH_THRESHOLD};
 
@@ -68,6 +78,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
 use std::cmp::Ordering;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -91,6 +102,36 @@ impl Default for Durability {
     }
 }
 
+/// A payload field included in lexical retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LexicalField {
+    /// Payload field name. Dotted paths are supported.
+    pub field: String,
+    /// Field weight used for BM25 term frequency.
+    #[serde(default = "default_lexical_weight")]
+    pub weight: f32,
+}
+
+fn default_lexical_weight() -> f32 {
+    1.0
+}
+
+impl LexicalField {
+    /// Create a field with the default weight.
+    pub fn new(field: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            weight: default_lexical_weight(),
+        }
+    }
+
+    /// Set the field weight.
+    pub fn with_weight(mut self, weight: f32) -> Self {
+        self.weight = weight;
+        self
+    }
+}
+
 /// Configuration for a collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionConfig {
@@ -99,6 +140,9 @@ pub struct CollectionConfig {
     /// Durability level for writes.
     #[serde(default)]
     pub durability: Durability,
+    /// Payload fields indexed for lexical/BM25 retrieval.
+    #[serde(default)]
+    pub lexical_fields: Vec<LexicalField>,
 }
 
 impl CollectionConfig {
@@ -107,12 +151,19 @@ impl CollectionConfig {
         Self {
             dim,
             durability: Durability::default(),
+            lexical_fields: Vec::new(),
         }
     }
 
     /// Set the durability level.
     pub fn with_durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
+        self
+    }
+
+    /// Set the payload fields indexed for lexical retrieval.
+    pub fn with_lexical_fields(mut self, lexical_fields: Vec<LexicalField>) -> Self {
+        self.lexical_fields = lexical_fields;
         self
     }
 }
@@ -372,6 +423,8 @@ pub struct Collection {
     next_internal_id: AtomicU64,
     /// HNSW index for approximate search (loaded on demand)
     hnsw_index: ArcSwap<Option<Arc<HnswIndex>>>,
+    /// Lexical/BM25 index over configured payload fields.
+    lexical_index: RwLock<LexicalIndex>,
 }
 
 impl std::fmt::Debug for Collection {
@@ -448,10 +501,12 @@ impl Collection {
             wal: Mutex::new(wal),
             next_internal_id: AtomicU64::new(0),
             hnsw_index: ArcSwap::new(Arc::new(hnsw_index)),
+            lexical_index: RwLock::new(LexicalIndex::new()),
         };
 
         // Recover from WAL
         collection.recover()?;
+        collection.rebuild_lexical_index();
 
         Ok(collection)
     }
@@ -508,6 +563,313 @@ impl Collection {
         &self.path
     }
 
+    fn lexical_fields_for_payload(&self, payload: Option<&serde_json::Value>) -> Vec<(String, f32)> {
+        let Some(payload) = payload else {
+            return Vec::new();
+        };
+        self.config
+            .lexical_fields
+            .iter()
+            .filter_map(|field| {
+                let value = crate::filter::get_field(payload, &field.field)?;
+                let text = match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Array(values) => values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    serde_json::Value::Number(_) | serde_json::Value::Bool(_) => value.to_string(),
+                    _ => return None,
+                };
+                if text.is_empty() {
+                    None
+                } else {
+                    Some((text, field.weight))
+                }
+            })
+            .collect()
+    }
+
+    fn rebuild_lexical_index(&self) {
+        if self.config.lexical_fields.is_empty() {
+            return;
+        }
+
+        let mut index = LexicalIndex::new();
+        let segments = self.segments.load();
+        for segment in segments.iter() {
+            for (internal_id, external_id, _vector) in segment.iter() {
+                let payload = segment.get_payload(internal_id);
+                let fields = self.lexical_fields_for_payload(payload.as_ref());
+                if !fields.is_empty() {
+                    let refs: Vec<(&str, f32)> = fields
+                        .iter()
+                        .map(|(text, weight)| (text.as_str(), *weight))
+                        .collect();
+                    index.insert(&external_id, &refs);
+                }
+            }
+        }
+
+        let memtable = self.memtable.read().unwrap();
+        for document in memtable.documents().values() {
+            if memtable.is_deleted_by_external(&document.external_id) {
+                continue;
+            }
+            let fields = self.lexical_fields_for_payload(document.payload.as_ref());
+            if !fields.is_empty() {
+                let refs: Vec<(&str, f32)> = fields
+                    .iter()
+                    .map(|(text, weight)| (text.as_str(), *weight))
+                    .collect();
+                index.insert(&document.external_id, &refs);
+            }
+        }
+        drop(memtable);
+
+        *self.lexical_index.write().unwrap() = index;
+    }
+
+    /// Search the configured payload fields with BM25.
+    ///
+    /// A filter is evaluated against the current payload, so stale segment
+    /// entries cannot bypass it.
+    pub fn lexical_search(
+        &self,
+        query: &str,
+        top_k: usize,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<LexicalHit>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let fetch_k = if filter.is_some() {
+            top_k.saturating_mul(8)
+        } else {
+            top_k
+        };
+        let hits = self.lexical_index.read().unwrap().search(query, fetch_k);
+        if filter.is_none() {
+            return Ok(hits);
+        }
+
+        let mut filtered = Vec::with_capacity(top_k);
+        for hit in hits {
+            let Some(document) = self.get(&hit.id)? else {
+                continue;
+            };
+            let Some(payload) = document.payload else {
+                continue;
+            };
+            if filter.unwrap().evaluate(&payload) {
+                filtered.push(hit);
+                if filtered.len() == top_k {
+                    break;
+                }
+            }
+        }
+        Ok(filtered)
+    }
+
+    /// Run dense and lexical retrieval independently, fuse by Reciprocal Rank
+    /// Fusion, and return fused scores plus both lane ranks.
+    pub fn hybrid_search(&self, hybrid: &HybridSearch<'_>) -> Result<Vec<HybridMatch>> {
+        let candidate_k = hybrid.candidate_k_value();
+        let mut dense_query = Search::new(hybrid.vector())
+            .top_k(candidate_k)
+            .distance(hybrid.distance_metric());
+        if let Some(filter) = hybrid.filter_ref() {
+            dense_query = dense_query.filter(filter.clone());
+        }
+        let dense = self.search(&dense_query)?;
+        let lexical = self.lexical_search(hybrid.text(), candidate_k, hybrid.filter_ref())?;
+        let (vector_weight, lexical_weight) = hybrid.lane_weights_value();
+        let rrf_k = hybrid.rrf_k_value();
+        let mut fused: HashMap<String, HybridMatch> = HashMap::new();
+
+        for (index, hit) in dense.into_iter().enumerate() {
+            let rank = index + 1;
+            let id = hit.id;
+            let entry = fused.entry(id.clone()).or_insert_with(|| HybridMatch {
+                id,
+                score: 0.0,
+                rrf_score: 0.0,
+                vector_score: None,
+                lexical_score: None,
+                vector_rank: None,
+                lexical_rank: None,
+                rerank_score: None,
+                payload: hit.payload,
+            });
+            entry.vector_score = Some(hit.score);
+            entry.vector_rank = Some(rank);
+            entry.score += vector_weight / (rrf_k + rank) as f32;
+        }
+
+        for (index, hit) in lexical.into_iter().enumerate() {
+            let rank = index + 1;
+            let entry = fused.entry(hit.id.clone()).or_insert_with(|| HybridMatch {
+                id: hit.id,
+                score: 0.0,
+                rrf_score: 0.0,
+                vector_score: None,
+                lexical_score: None,
+                vector_rank: None,
+                lexical_rank: None,
+                rerank_score: None,
+                payload: None,
+            });
+            entry.lexical_score = Some(hit.score);
+            entry.lexical_rank = Some(rank);
+            entry.score += lexical_weight / (rrf_k + rank) as f32;
+        }
+
+        let mut results: Vec<HybridMatch> = fused.into_values().collect();
+        for result in &mut results {
+            result.payload = self.get(&result.id)?.and_then(|document| document.payload);
+            result.rrf_score = result.score;
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if let Some(field) = hybrid.group_by_ref() {
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            let max_per_document = hybrid.max_per_document_value();
+            let mut diverse = Vec::with_capacity(hybrid.top_k_value());
+            for result in results {
+                let key = result
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| crate::filter::get_field(payload, field))
+                    .map(|value| match value {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_else(|| result.id.clone());
+                let count = counts.entry(key).or_insert(0);
+                if *count >= max_per_document {
+                    continue;
+                }
+                *count += 1;
+                diverse.push(result);
+                if diverse.len() == hybrid.top_k_value() {
+                    break;
+                }
+            }
+            results = diverse;
+        }
+        results.truncate(hybrid.top_k_value());
+        Ok(results)
+    }
+
+    /// Rerank the top of a hybrid result set with a query-document model.
+    ///
+    /// Only the first `shortlist` candidates are scored. The final score blends
+    /// normalized RRF and reranker scores; original RRF remains in
+    /// [`HybridMatch::rrf_score`].
+    pub fn hybrid_search_reranked(
+        &self,
+        hybrid: &HybridSearch<'_>,
+        reranker: &dyn crate::rerank::Reranker,
+        text_field: &str,
+        rerank_weight: f32,
+        shortlist: usize,
+    ) -> Result<Vec<HybridMatch>> {
+        if !(0.0..=1.0).contains(&rerank_weight) {
+            return Err(Error::invalid_arg(
+                "rerank_weight",
+                format!("must be between 0 and 1 (got {rerank_weight})"),
+            ));
+        }
+        if shortlist == 0 {
+            return Err(Error::invalid_arg("shortlist", "must be positive"));
+        }
+
+        let mut results = self.hybrid_search(hybrid)?;
+        let count = shortlist.min(results.len());
+        if count == 0 {
+            return Ok(results);
+        }
+
+        let mut documents = Vec::with_capacity(count);
+        for result in results.iter().take(count) {
+            let value = result
+                .payload
+                .as_ref()
+                .and_then(|payload| crate::filter::get_field(payload, text_field))
+                .ok_or_else(|| {
+                    Error::invalid_arg(
+                        "rerank_text_field",
+                        format!("candidate {} has no payload field {text_field}", result.id),
+                    )
+                })?;
+            documents.push(match value {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(values) => values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                other => other.to_string(),
+            });
+        }
+
+        let document_refs: Vec<&str> = documents.iter().map(String::as_str).collect();
+        let rerank_scores = reranker.score(hybrid.text(), &document_refs)?;
+        if rerank_scores.len() != count || rerank_scores.iter().any(|score| !score.is_finite()) {
+            return Err(Error::invalid_arg(
+                "reranker",
+                format!(
+                    "expected {count} finite scores, got {}",
+                    rerank_scores.len()
+                ),
+            ));
+        }
+
+        let min_rrf = results[..count]
+            .iter()
+            .map(|result| result.score)
+            .fold(f32::INFINITY, f32::min);
+        let max_rrf = results[..count]
+            .iter()
+            .map(|result| result.score)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_rerank = rerank_scores.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_rerank = rerank_scores
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        for (index, result) in results[..count].iter_mut().enumerate() {
+            let rrf = if max_rrf > min_rrf {
+                (result.score - min_rrf) / (max_rrf - min_rrf)
+            } else {
+                0.5
+            };
+            let rerank = if max_rerank > min_rerank {
+                (rerank_scores[index] - min_rerank) / (max_rerank - min_rerank)
+            } else {
+                0.5
+            };
+            result.rerank_score = Some(rerank_scores[index]);
+            result.score = (1.0 - rerank_weight) * rrf + rerank_weight * rerank;
+        }
+
+        let mut ordered = results[..count].to_vec();
+        ordered.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ordered.extend(results.into_iter().skip(count));
+        Ok(ordered)
+    }
+
     /// Insert or replace a document.
     ///
     /// If a document with the same ID already exists, it is replaced.
@@ -522,6 +884,8 @@ impl Collection {
         }
 
         // Create WAL record
+        let lexical_fields = self.lexical_fields_for_payload(doc.payload.as_ref());
+        let lexical_id = doc.id.clone();
         let record = wal::insert_record(&doc);
 
         // Append to WAL
@@ -536,6 +900,19 @@ impl Collection {
         let mut memtable = self.memtable.write().unwrap();
         memtable.insert(doc)?;
         drop(memtable);
+
+        {
+            let mut lexical = self.lexical_index.write().unwrap();
+            if lexical_fields.is_empty() {
+                lexical.remove(&lexical_id);
+            } else {
+                let refs: Vec<(&str, f32)> = lexical_fields
+                    .iter()
+                    .map(|(text, weight)| (text.as_str(), *weight))
+                    .collect();
+                lexical.insert(&lexical_id, &refs);
+            }
+        }
 
         // Check if flush is needed (flush updates manifest)
         self.check_flush()?;
@@ -576,6 +953,15 @@ impl Collection {
                 ),
             ));
         }
+        let lexical_records: Vec<(String, Vec<(String, f32)>)> = docs
+            .iter()
+            .map(|doc| {
+                (
+                    doc.id.clone(),
+                    self.lexical_fields_for_payload(doc.payload.as_ref()),
+                )
+            })
+            .collect();
 
         // Append each document as separate WAL record (batch is just single transaction)
         let mut wal = self.wal.lock().unwrap();
@@ -600,11 +986,45 @@ impl Collection {
         }
         drop(memtable);
 
+        {
+            let mut lexical = self.lexical_index.write().unwrap();
+            for (id, fields) in lexical_records {
+                if fields.is_empty() {
+                    lexical.remove(&id);
+                } else {
+                    let refs: Vec<(&str, f32)> = fields
+                        .iter()
+                        .map(|(text, weight)| (text.as_str(), *weight))
+                        .collect();
+                    lexical.insert(&id, &refs);
+                }
+            }
+        }
+
         // Check flush (flush updates manifest)
 
         self.check_flush()?;
 
         Ok(())
+    }
+
+    /// List active external document IDs in deterministic order.
+    pub fn document_ids(&self) -> Vec<String> {
+        let mut ids = BTreeSet::new();
+        let segments = self.segments.load();
+        for segment in segments.iter() {
+            for (_internal_id, external_id, _vector) in segment.iter() {
+                ids.insert(external_id);
+            }
+        }
+        let memtable = self.memtable.read().unwrap();
+        for document in memtable.documents().values() {
+            ids.insert(document.external_id.clone());
+        }
+        for deleted in memtable.collect_deleted_ids() {
+            ids.remove(&deleted);
+        }
+        ids.into_iter().collect()
     }
 
     /// Get a document by ID.
@@ -660,6 +1080,7 @@ impl Collection {
         let mut memtable = self.memtable.write().unwrap();
         let existed = memtable.delete(id).is_some();
         drop(memtable);
+        self.lexical_index.write().unwrap().remove(id);
 
         Ok(existed)
     }

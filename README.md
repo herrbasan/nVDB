@@ -2,7 +2,7 @@
 
 > High-performance embedded vector database for AI/ML workflows.
 
-nVDB is an **embedded vector database** with SIMD-accelerated similarity search, optional HNSW approximate search, and MongoDB-like metadata filtering. Standalone embeddable database for Node.js and Rust applications.
+nVDB is an **embedded retrieval database** with SIMD-accelerated vector search, native BM25 lexical search, hybrid rank fusion, optional HNSW search, and MongoDB-like metadata filtering. Standalone embeddable database for Node.js and Rust applications.
 
 > **⚠️ BREAKING CHANGE (v3 Architecture)**
 > nVDB has transitioned to a **Database-as-a-Folder** architecture natively managed in Rust. Collections are now isolated folders containing `meta.json` (dimensionality and schemas) and data structures. Native delta operations like `patchPayload` replace total re-writes, drastically reducing I/O when only updating metadata on vectors.
@@ -10,6 +10,11 @@ nVDB is an **embedded vector database** with SIMD-accelerated similarity search,
 ## Features
 
 - **SIMD-accelerated search** — AVX2/AVX-512/NEON via the `wide` crate (8-wide `f32x8`)
+- **Native BM25 lexical search** — exact terms, titles, paths and identifiers over payload fields
+- **Hybrid retrieval** — dense + lexical lanes fused by Reciprocal Rank Fusion with lane diagnostics
+- **Diversity controls** — cap chunks per payload group before returning the shortlist
+- **Rerank-ready results** — wide candidate recall designed for an optional query-document reranker
+- **Optional ONNX CPU reranker** — `rerank-onnx` feature; small multilingual cross-encoder, top-N only
 - **HNSW approximate search** — Sub-linear search with configurable recall/latency tradeoffs
 - **LSM-Lite storage** — Memtable + memory-mapped segments + WAL for crash recovery
 - **Zero-copy reads** — Memory-mapped segments mean instant startup, no loading
@@ -77,6 +82,104 @@ for (const match of results) {
     console.log(`${match.id}: score=${match.score.toFixed(4)}`);
 }
 ```
+
+### Hybrid retrieval
+
+Lexical fields are declared at collection creation. The same fields are maintained on insert, update, delete, flush and reopen.
+
+```rust
+use nvdb::{HybridSearch, LexicalField};
+
+let coll = db.create_collection(
+    "documents",
+    CollectionConfig::new(768).with_lexical_fields(vec![
+        LexicalField::new("title").with_weight(3.0),
+        LexicalField::new("path").with_weight(2.0),
+        LexicalField::new("body"),
+    ]),
+)?;
+
+coll.insert(Document {
+    id: "doc1".to_string(),
+    vector: vec![0.1; 768],
+    payload: Some(json!({
+        "title": "Consciousness Is the Record",
+        "path": "blog/consciousness-is-the-record.md",
+        "body": "…"
+    })),
+})?;
+
+let results = coll.hybrid_search(
+    &HybridSearch::new(&query_vector, "Consciousness Is the Record")
+        .top_k(10)
+        .candidate_k(100)
+        .diversity("path", 3),
+)?;
+
+for hit in results {
+    println!(
+        "{} fused={:.4} dense_rank={:?} lexical_rank={:?}",
+        hit.id, hit.score, hit.vector_rank, hit.lexical_rank
+    );
+}
+```
+
+Node.js:
+
+```js
+const coll = db.createCollection('documents', 768, {
+    durability: 'buffered',
+    lexicalFields: [
+        { field: 'title', weight: 3 },
+        { field: 'path', weight: 2 },
+        { field: 'body', weight: 1 }
+    ]
+});
+
+const results = await coll.hybridSearch({
+    vector: queryVector,
+    text: 'Consciousness Is the Record',
+    topK: 10,
+    candidateK: 100,
+    groupBy: 'path',
+    maxPerDocument: 3
+});
+```
+
+`hybridSearch` returns fused `score`, raw `vectorScore`, raw `lexicalScore`, and one-based `vectorRank` / `lexicalRank` per result. Raw cosine and BM25 scores are lane diagnostics; use the fused score for ordering.
+
+### Optional ONNX CPU reranker
+
+Enable the feature and use a small cross-encoder over the top candidates:
+
+```toml
+nvdb = { version = "0.1", features = ["rerank-onnx"] }
+```
+
+```rust
+use nvdb::{OnnxReranker, OnnxRerankerConfig};
+
+let reranker = OnnxReranker::load(OnnxRerankerConfig::new(
+    "/models/reranker.onnx",
+    "/models/tokenizer.json",
+))?;
+
+let results = coll.hybrid_search_reranked(
+    &HybridSearch::new(&query_vector, "Consciousness Is the Record")
+        .top_k(10)
+        .candidate_k(200)
+        .diversity("path", 2),
+    &reranker,
+    "content", // payload field holding candidate text
+    0.2,       // blend weight: 80% RRF, 20% reranker
+    10,        // rerank only the top 10
+)?;
+```
+
+The optional backend loads an external ONNX sequence-classification model and
+`tokenizer.json`; nVDB stays free of model artifacts and inference SDKs unless
+the feature is enabled. `rrf_score` preserves the pre-rerank ordering signal and
+`rerank_score` exposes the model score.
 
 ## Documentation
 
