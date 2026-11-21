@@ -256,6 +256,58 @@ impl IntegrityReport {
     }
 }
 
+/// One document's fingerprint as exposed to a synchronising caller.
+///
+/// The hex hashes are the same values [`crate::sync::compute_content_hash`] and
+/// [`crate::sync::compute_envelope_hash`] produce, so a caller can compare them
+/// against its own source-side hashes without decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FingerprintEntry {
+    /// Document identifier.
+    pub id: String,
+    /// Hex digest of the searchable text.
+    pub content_hash: String,
+    /// Hex digest of the canonicalised envelope (ACL included).
+    pub envelope_hash: String,
+    /// Whether the index holds an embedding for the live text.
+    pub has_vector: bool,
+    /// Group IDs the ACL overlay holds for the document.
+    pub acl: Vec<String>,
+}
+
+/// One fingerprint a caller expects the index to hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedFingerprint {
+    /// Document identifier.
+    pub id: String,
+    /// Hex digest of the source's searchable text.
+    pub content_hash: String,
+    /// Hex digest of the source's canonicalised envelope.
+    pub envelope_hash: String,
+}
+
+/// Difference between the caller's expected fingerprints and the live ones.
+///
+/// Every vector is sorted and deduplicated. `missing_vectors` names documents
+/// the index *tracks* but holds no embedding for; a document that is missing
+/// altogether is reported once, in [`Self::missing`], because it must be
+/// upserted before an embedding can apply to it at all.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IntegrityDiff {
+    /// True when every difference vector is empty.
+    pub clean: bool,
+    /// Expected documents the index does not track.
+    pub missing: Vec<String>,
+    /// Tracked documents the caller did not expect.
+    pub extra: Vec<String>,
+    /// Documents whose searchable text hash differs.
+    pub content_mismatched: Vec<String>,
+    /// Documents whose envelope hash differs.
+    pub envelope_mismatched: Vec<String>,
+    /// Tracked documents without an embedding, when vectors were checked.
+    pub missing_vectors: Vec<String>,
+}
+
 /// One promoted metadata column.
 #[derive(Debug, Clone)]
 struct PromotedColumn {
@@ -561,6 +613,79 @@ impl V2Index {
         self.fingerprints.get(id)
     }
 
+    /// Every tracked document's fingerprint and ACL, ordered by `id`.
+    ///
+    /// This is the read side of the fingerprint exchange: a caller compares the
+    /// returned hashes against its own source hashes and reports only what
+    /// differs, instead of shipping the whole index.
+    pub fn fingerprint_entries(&self) -> Vec<FingerprintEntry> {
+        let mut entries: Vec<FingerprintEntry> = self
+            .fingerprints
+            .iter()
+            .map(|(id, fingerprint)| FingerprintEntry {
+                id: id.clone(),
+                content_hash: digest_to_hex(&fingerprint.content_hash),
+                envelope_hash: digest_to_hex(&fingerprint.envelope_hash),
+                has_vector: self.vector_for(id).is_some(),
+                acl: self.acl.groups(id).unwrap_or(&[]).to_vec(),
+            })
+            .collect();
+        entries.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        entries
+    }
+
+    /// Compare the caller's expected fingerprints against the live ones.
+    ///
+    /// Hex comparison is case-insensitive so an uppercased hash from another
+    /// implementation is not reported as a mismatch. With `check_vectors`,
+    /// every expected document the index tracks must also hold an embedding for
+    /// its live text.
+    pub fn integrity_check_entries(
+        &self,
+        expected: &[ExpectedFingerprint],
+        check_vectors: bool,
+    ) -> IntegrityDiff {
+        let mut diff = IntegrityDiff::default();
+        let mut seen: HashSet<&str> = HashSet::with_capacity(expected.len());
+        for entry in expected {
+            seen.insert(entry.id.as_str());
+            match self.fingerprints.get(&entry.id) {
+                None => diff.missing.push(entry.id.clone()),
+                Some(stored) => {
+                    if !digest_to_hex(&stored.content_hash)
+                        .eq_ignore_ascii_case(&entry.content_hash)
+                    {
+                        diff.content_mismatched.push(entry.id.clone());
+                    }
+                    if !digest_to_hex(&stored.envelope_hash)
+                        .eq_ignore_ascii_case(&entry.envelope_hash)
+                    {
+                        diff.envelope_mismatched.push(entry.id.clone());
+                    }
+                    if check_vectors && self.vector_for(&entry.id).is_none() {
+                        diff.missing_vectors.push(entry.id.clone());
+                    }
+                }
+            }
+        }
+        for id in self.fingerprints.keys() {
+            if !seen.contains(id.as_str()) {
+                diff.extra.push(id.clone());
+            }
+        }
+        diff.missing.sort_unstable();
+        diff.extra.sort_unstable();
+        diff.content_mismatched.sort_unstable();
+        diff.envelope_mismatched.sort_unstable();
+        diff.missing_vectors.sort_unstable();
+        diff.clean = diff.missing.is_empty()
+            && diff.extra.is_empty()
+            && diff.content_mismatched.is_empty()
+            && diff.envelope_mismatched.is_empty()
+            && diff.missing_vectors.is_empty();
+        diff
+    }
+
     /// Insert or replace one document.
     ///
     /// The replace is a `delete_term(id)` + `add_document` pair inside the same
@@ -641,6 +766,20 @@ impl V2Index {
             degraded: true,
             degraded_reason: Some(reason),
         });
+        V2Manifest::save_atomic(&self.manifest, &self.dir)
+    }
+
+    /// Atomically replace the sync watermark and persist the manifest.
+    ///
+    /// The invariants are checked at the engine boundary as well as at the HTTP
+    /// boundary: a degraded-without-reason or epoch-less watermark would make
+    /// the next open read a state the index can never have produced.
+    pub fn set_watermark(&mut self, watermark: SyncWatermark) -> Result<(), V2Error> {
+        watermark
+            .validate()
+            .map_err(|error| V2Error::InvalidConfig(error.to_string()))?;
+        self.manifest.watermark = Some(watermark);
+        self.manifest.doc_count = self.fingerprints.len() as u64;
         V2Manifest::save_atomic(&self.manifest, &self.dir)
     }
 

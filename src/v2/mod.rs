@@ -60,7 +60,10 @@ pub mod vectors;
 
 pub use acl_overlay::AclOverlay;
 pub use analyzer::{body_part_terms, extract_body_parts, MAX_BODY_PARTS};
-pub use engine::{DocFingerprint, IntegrityReport, V2Index, V2Manifest, V2_MANIFEST_FILE};
+pub use engine::{
+    DocFingerprint, ExpectedFingerprint, FingerprintEntry, IntegrityDiff, IntegrityReport, V2Index,
+    V2Manifest, V2_MANIFEST_FILE,
+};
 pub use german_lexicon::{decompose_german_compound, GERMAN_LEXICON_VERSION};
 pub use level2::{V2Level2Hit, V2Level2Options, V2Level2Result};
 pub use query::{

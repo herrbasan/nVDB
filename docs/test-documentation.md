@@ -131,22 +131,33 @@ engine — hand-rolled HTTP/1.1 on `std::net` (no new crate), one thread per
 connection behind a cap, JSON in and out. The suite binds the server to
 `127.0.0.1:0`, talks to it over a real TCP socket, and asserts on the raw status
 line and JSON body, so the route table, the error codes and the fail-closed ACL
-path are tested exactly as a client sees them.
+path are tested exactly as a client sees them. It also covers the Phase-4
+coordination routes (`fingerprints`, `integrity_check`, `watermark`) and
+`level2`, the last of which is exercised with a mock `Reranker` passed through
+`start_in_background_with_reranker`, so no model artifact is needed.
 
 | Test | Purpose | Success Criteria |
 |------|---------|------------------|
-| `health_reports_engine_and_rejects_path_traversal` | `/health`, collection create, name validation | `{"ok":true,"engine":"nvdb-v2","collections":[]}` before any create; `POST /v2/collections {"name":"docs"}` opens the collection and writes `v2_manifest.json`; `../evil` is `400 invalid_collection_name` and creates nothing outside the root |
+| `health_reports_engine_and_rejects_path_traversal` | `/health`, collection create, name validation | `{"ok":true,"engine":"nvdb-v2","collections":[],"reranker_loaded":false}` before any create; `POST /v2/collections {"name":"docs"}` opens the collection and writes `v2_manifest.json`; `../evil` is `400 invalid_collection_name` and creates nothing outside the root |
 | `foreign_directory_is_refused_instead_of_hijacked` | Startup-adjacent safety | A pre-existing non-empty directory that is not a v2 collection answers `403 foreign_directory` and its files are untouched |
 | `upsert_commit_search_acl_and_delete_round_trip` | Whole write/read surface | `commit:false` upserts are invisible until `POST .../commit` reports `doc_count`; a query without principals is `400 missing_principals`; a valid query returns hits with a numeric `took_ms`; `POST .../acl` bumps `acl_generation` and the revoked group sees zero hits on the very next search while the new group sees the doc; delete reports `deleted:1`, empties the search, and `/v2/collections` reports the remaining `doc_count`; unknown collection and unknown route are `404` with their own `code` |
 | `restart_rediscovers_the_collection_and_its_documents` | Persistence across processes | After a shutdown, a second server on the same root lists the collection in `/health` and `/v2/collections` and finds the committed document by search — proving the index writer was released |
 | `malformed_bodies_are_rejected_with_400` | Fail-loud input handling | An absent body is `400 empty_body`; a misspelled key (`nam`, `principal`) is `400 invalid_body` instead of being silently ignored |
 | `degraded_index_refuses_search_with_503` | Degraded boot-heal watermark | A collection marked degraded at open lists its `watermark.degraded = true` and search answers `503 index_degraded` instead of a partial result |
+| `fingerprints_report_hashes_vectors_and_acl_in_id_order` | `GET .../fingerprints` | The response reports `doc_count`, a null watermark before any sync, and one entry per document **sorted by id**; `content_hash`/`envelope_hash` are 64-character hex and the ACL is the normalized overlay set; `has_vector` is `false` until the embedding the entry names is attached through `attach_vectors`, then `true` for that document only |
+| `integrity_check_reports_every_kind_of_difference` | `POST .../integrity_check` | Expected fingerprints taken from the live index are `clean: true` with every difference vector empty; with `check_vectors: true` on a lane-less collection both documents land in `missing_vectors`; an uppercase-free hex mismatch puts the document in `content_mismatched` **and** `envelope_mismatched`, an unknown expected id in `missing`, and an unexpected live document in `extra` |
+| `watermark_is_validated_persisted_and_survives_reopen` | `POST .../watermark` | An empty `source_epoch_uuid`, `degraded: true` without a reason and a reason while not degraded are each `400 invalid_watermark` and persist nothing; a valid watermark answers `{"ok":true,"watermark":{...}}` and appears in `GET .../fingerprints`; a second server on the same root reads it back (`epoch-1`, seq `3`, not degraded) and still answers search |
+| `level2_fails_closed_without_principals_or_a_reranker` | `POST .../level2` fail-closed prelude | Empty principals is `400 missing_principals` (checked before anything else); a server started without a reranker reports `reranker_loaded: false` in `/health` and answers `503 reranker_not_configured` |
+| `level2_reranks_filters_revoked_documents_and_enforces_the_floor` | `POST .../level2` with a mock `Reranker` | A document revoked through `.../acl` after Level 1 saw it is dropped although it was the first hit — its text is absent from the reranker's recorded input and from the answer; the reranker order wins at `rerank_weight: 50` (`doc-b` over the Level-1-first `doc-a`) with `best_rerank_score = 0.9` and no rejection; `texts` overrides `title + " " + path`; a nonsense query with `relevance_floor: 0.5` sets `rejected: true` while keeping the hit, and the default floor (`0.02`) rejects the same `0.01` score |
 
 **Key Invariants Verified:**
 - A search without principals can never widen to "match everything" over HTTP either
 - The ACL-only route is the fast path: visibility flips with no re-index, and the new generation is reported
 - A collection name can never escape the root directory, and a foreign directory is never taken over
 - Shutdown releases the index, so restarting on the same directory works
+- The fingerprint exchange is symmetric: hashes returned by `GET .../fingerprints` are accepted unchanged by `POST .../integrity_check`
+- A watermark that violates its own invariants is refused with `400` and never reaches the manifest; a valid one survives a restart
+- `level2` is the strictest route in the file: principals first, then degradation, then the reranker — and a document the ACL overlay refuses never reaches the reranker at all
 
 **Unit tests (`src/v2/server.rs`):**
 

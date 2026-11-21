@@ -453,7 +453,7 @@ Both sidecars are length-prefixed binary, not JSON: `open()` is a read path, and
 **HTTP front end (`src/v2/server.rs`, `nvdb serve`):** hand-rolled HTTP/1.1 on `std::net` — no new crate, same shape as `nDB`'s daemon (thread per connection behind a cap, keep-alive, 30 s I/O timeouts, 64 MB body cap). `V2Server` owns `root_dir: PathBuf` and `collections: RwLock<HashMap<String, Arc<RwLock<V2Index>>>>`; startup adopts every direct subdirectory holding a `v2_manifest.json` and **fails loud** if one will not open.
 
 ```
-GET  /health                            -> {"ok":true,"engine":"nvdb-v2","collections":[...]}
+GET  /health                            -> {"ok":true,"engine":"nvdb-v2","collections":[...],"reranker_loaded":bool}
 GET  /v2/collections                    -> {"collections":[{name,doc_count,acl_generation,watermark}]}
 POST /v2/collections                    <- {"name","config"?}
 POST /v2/collections/{name}/upsert      <- {"docs":[V2Document],"commit"?=true} -> {"upserted":N}
@@ -464,11 +464,19 @@ POST /v2/collections/{name}/search      <- V2Query JSON -> {"hits":[V2SearchHit]
 POST /v2/collections/{name}/hybrid_search <- V2HybridQuery JSON -> {"hits":[V2HybridHit],"took_ms":f64}
 GET  /v2/collections/{name}/pending_embeddings?limit=100 -> {"count":N,"pending":[PendingEmbedding]}
 POST /v2/collections/{name}/attach_vectors <- {"attachments":[VectorAttachment]} -> {"attached":N,"vec_generation":N}
+GET  /v2/collections/{name}/fingerprints -> {"doc_count":N,"watermark":SyncWatermark?,"entries":[FingerprintEntry]}
+POST /v2/collections/{name}/integrity_check <- {"expected":[ExpectedFingerprint],"check_vectors"?=false} -> IntegrityDiff
+POST /v2/collections/{name}/watermark    <- SyncWatermark -> {"ok":true,"watermark":SyncWatermark}
+POST /v2/collections/{name}/level2       <- {"query_text","principals","hits":[...],"texts"?,"shortlist"?,"rerank_weight"?,"relevance_floor"?} -> V2Level2Result
 ```
 
-Errors are `{"error": "...", "code": "..."}` with an explicit status: `400` malformed body / invalid name (traversal included) / `MissingPrincipals` / `WrongDimension` / `vector_lane_not_configured`, `403` a non-v2 directory the server refuses to take over, `404` unknown route or collection, `409` config/version conflict or a stale vector attachment (`stale_vector_cas`), `500` IO or corruption, `503` `IndexDegraded` (the degraded boot-heal watermark). Collection names are `[a-zA-Z0-9._-]+` and `.`/`..` are rejected, so a name can never escape `root_dir`. `V2Query` is the wire type (`Deserialize` with `deny_unknown_fields`); `V2SearchHit`/`V2Explain` are `Serialize`.
+Errors are `{"error": "...", "code": "..."}` with an explicit status: `400` malformed body / invalid name (traversal included) / `MissingPrincipals` / `WrongDimension` / `vector_lane_not_configured` / `invalid_watermark`, `403` a non-v2 directory the server refuses to take over, `404` unknown route or collection, `409` config/version conflict or a stale vector attachment (`stale_vector_cas`), `500` IO, corruption or a reranker that broke its contract (`rerank_failed`), `503` `IndexDegraded` (the degraded boot-heal watermark) or `reranker_not_configured` (`level2` on a server started without `--reranker-model`). Collection names are `[a-zA-Z0-9._-]+` and `.`/`..` are rejected, so a name can never escape `root_dir`. `V2Query` is the wire type (`Deserialize` with `deny_unknown_fields`); `V2SearchHit`/`V2Explain` are `Serialize`.
 
-`start_in_background(root, addr)` (with `127.0.0.1:0`) returns a handle carrying the bound `SocketAddr`; `shutdown()` stops the accept loop, waits for in-flight requests and drops every index so the Tantivy writer lock is released and a restart on the same directory works. `serve_blocking` is the CLI path: `nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510]`.
+`start_in_background(root, addr)` (with `127.0.0.1:0`) returns a handle carrying the bound `SocketAddr`; `shutdown()` stops the accept loop, waits for in-flight requests and drops every index so the Tantivy writer lock is released and a restart on the same directory works. `serve_blocking` is the CLI path: `nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510] [--reranker-model <dir>]`. `start_in_background_with_reranker` / `serve_blocking_with_reranker` (and `V2Server::with_reranker`) attach an `Arc<dyn Reranker>`; without one `/level2` answers `503 reranker_not_configured` rather than silently dropping to Level-1 ordering. Under `--features rerank-onnx`, `--reranker-model <dir>` loads `<dir>/model.onnx` + `<dir>/tokenizer.json` and **fails startup** if either will not load; without the feature the flag is a startup error rather than a silent downgrade.
+
+**Fingerprint exchange.** `V2Index::fingerprint_entries()` returns `{id, content_hash, envelope_hash, has_vector, acl}` per tracked document, sorted by id, with the hashes in the same hex form `compute_content_hash`/`compute_envelope_hash` produce. `integrity_check_entries(&expected, check_vectors)` compares caller-supplied `{id, content_hash, envelope_hash}` triples against the live fingerprints (hex compared case-insensitively) and returns `IntegrityDiff { clean, missing, extra, content_mismatched, envelope_mismatched, missing_vectors }`; `missing_vectors` names documents the index *tracks* without an embedding and is only populated when `check_vectors` is set. `set_watermark(SyncWatermark)` validates the watermark invariants and persists `v2_manifest.json` atomically — the route validates the wire form (optional `degraded`/`degraded_reason`) and answers `400 invalid_watermark`.
+
+**HTTP Level 2.** The route re-runs the Level-2 contract against the **ACL overlay** instead of a `SourceConnector`: Level-1 hits whose id the overlay does not grant to the caller are dropped before anything else, so a revoked document is neither scored nor echoed (Level 1 is evidence, not permission). Survivors are capped at `shortlist` (20) *after* the ACL filter; text is `texts[id]`, else `hit.excerpt`, else `title + " " + path`; the reranker is verified (exactly one finite score per document, else `500 rerank_failed`) and fused with the Level-1 order by the same weighted RRF (`LEVEL2_RRF_K = 60`, `1.0` vs `rerank_weight`, default `0.2`). `best_rerank_score < relevance_floor` (default `0.02`) sets `rejected = true` while keeping the hits as low-relevance evidence.
 
 ### Vector Lane & Unified Hybrid Search (`src/v2/vectors.rs`, `level2.rs`, Phase 3)
 
@@ -522,8 +530,10 @@ reranker, options)` takes the first `shortlist` (20) survivors. With a
 re-checked; a document revoked or deleted since the last sync is dropped
 silently — announcing it would disclose that it exists — and its text never
 reaches the reranker. Reranker text is `envelope.indexable_text` when a source is
-present, otherwise `excerpt` or `title + " " + path`. A `Reranker` result is
-verified (one finite score per document, else `V2Error::Rerank`) and fused with
+present, otherwise `excerpt` or `title + " " + path`. A `Reranker` (the trait
+requires `Send + Sync` because the HTTP server shares one behind an `Arc`)
+result is verified (one finite score per document, else `V2Error::Rerank`) and
+fused with
 the Level-1 order by weighted RRF (`1.0` vs `rerank_weight`, default `0.2`).
 `best_rerank_score < relevance_floor` (default `0.02`) sets `rejected = true`
 while keeping the hits as low-relevance evidence.

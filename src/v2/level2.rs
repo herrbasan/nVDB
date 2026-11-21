@@ -20,13 +20,18 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::rerank::Reranker;
 use crate::sync::SourceConnector;
 use crate::v2::query::{V2HybridHit, V2SearchHit};
 use crate::v2::{V2Error, V2Index};
 
 /// RRF damping constant of the Level-1 / reranker fusion.
-const LEVEL2_RRF_K: f32 = 60.0;
+///
+/// Public because the `level2` HTTP route runs the same fusion over
+/// client-supplied candidate texts and must not invent a second constant.
+pub const LEVEL2_RRF_K: f32 = 60.0;
 
 /// Default number of survivors handed to the reranker.
 pub const DEFAULT_SHORTLIST: usize = 20;
@@ -85,7 +90,7 @@ impl V2Level2Options {
 }
 
 /// One refined hit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2Level2Hit {
     /// The Level-1 hit, re-ordered; `hybrid.hit.score` still holds the Level-1
     /// fused score so the two stages stay distinguishable.
@@ -98,7 +103,7 @@ pub struct V2Level2Hit {
 }
 
 /// Result of one Level-2 refinement.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct V2Level2Result {
     /// True when the best reranker score fell below the relevance floor: the
     /// query found nothing relevant and `hits` is low-relevance evidence, not an

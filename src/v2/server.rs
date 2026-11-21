@@ -9,7 +9,7 @@
 //!
 //! | Method | Path | Body | 200 response |
 //! |---|---|---|---|
-//! | `GET` | `/health` | — | `{"ok":true,"engine":"nvdb-v2","collections":[names]}` |
+//! | `GET` | `/health` | — | `{"ok":true,"engine":"nvdb-v2","collections":[names],"reranker_loaded":bool}` |
 //! | `GET` | `/v2/collections` | — | `{"collections":[{name,doc_count,acl_generation,watermark}]}` |
 //! | `POST` | `/v2/collections` | `{"name","config"?}` | `{"ok":true,"collection":{...}}` |
 //! | `POST` | `/v2/collections/{name}/upsert` | `{"docs":[V2Document],"commit"?}` | `{"upserted":N}` |
@@ -20,6 +20,10 @@
 //! | `POST` | `/v2/collections/{name}/hybrid_search` | `V2HybridQuery` | `{"hits":[V2HybridHit],"took_ms":f64}` |
 //! | `GET` | `/v2/collections/{name}/pending_embeddings?limit=N` | — | `{"pending":[PendingEmbedding],"count":N}` |
 //! | `POST` | `/v2/collections/{name}/attach_vectors` | `{"attachments":[VectorAttachment]}` | `{"attached":N,"vec_generation":N}` |
+//! | `GET` | `/v2/collections/{name}/fingerprints` | — | `{"doc_count":N,"watermark":Option<SyncWatermark>,"entries":[FingerprintEntry]}` |
+//! | `POST` | `/v2/collections/{name}/integrity_check` | `{"expected":[ExpectedFingerprint],"check_vectors"?}` | `IntegrityDiff` |
+//! | `POST` | `/v2/collections/{name}/watermark` | `SyncWatermark` | `{"ok":true,"watermark":SyncWatermark}` |
+//! | `POST` | `/v2/collections/{name}/level2` | `{"query_text","principals","hits",...}` | `V2Level2Result` |
 //!
 //! `commit` defaults to `true` on every write route except `attach_vectors`,
 //! which commits its own link generation atomically because the caller has
@@ -31,17 +35,17 @@
 //!
 //! | Status | Meaning |
 //! |---|---|
-//! | `400` | malformed body, invalid collection name (traversal included), invalid query, no principals, no vector lane |
+//! | `400` | malformed body, invalid collection name (traversal included), invalid query, no principals, no vector lane, an invalid watermark |
 //! | `403` | a directory the server refuses to take over (non-empty, not a v2 collection) |
 //! | `404` | unknown route, unknown collection, no manifest |
 //! | `409` | persisted collection conflicts with the requested config or build versions; a stale vector attachment |
-//! | `500` | filesystem, Tantivy or state corruption |
-//! | `503` | index degraded (a degraded boot-heal watermark surfaces here) |
+//! | `500` | filesystem, Tantivy or state corruption; a reranker that broke its contract |
+//! | `503` | index degraded (a degraded boot-heal watermark), or `level2` on a server without a reranker |
 //!
 //! Collection names are restricted to `[a-zA-Z0-9._-]+` and `.`/`..` are
 //! rejected, so a name can never escape `root_dir`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -55,10 +59,14 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::sync::VectorAttachment;
+use crate::rerank::Reranker;
+use crate::sync::{SyncWatermark, VectorAttachment};
+use crate::v2::level2::{
+    DEFAULT_RELEVANCE_FLOOR, DEFAULT_RERANK_WEIGHT, DEFAULT_SHORTLIST, LEVEL2_RRF_K,
+};
 use crate::v2::{
-    V2CollectionConfig, V2Document, V2Error, V2HybridQuery, V2Index, V2Manifest, V2Query,
-    V2_MANIFEST_FILE,
+    ExpectedFingerprint, V2CollectionConfig, V2Document, V2Error, V2HybridHit, V2HybridQuery,
+    V2Index, V2Level2Hit, V2Level2Result, V2Manifest, V2Query, V2_MANIFEST_FILE,
 };
 
 /// Hard cap on a request body. Larger requests are answered with `413`.
@@ -82,6 +90,9 @@ const DEFAULT_PENDING_LIMIT: usize = 100;
 pub struct V2Server {
     root_dir: PathBuf,
     collections: RwLock<HashMap<String, Arc<RwLock<V2Index>>>>,
+    /// Optional Level-2 reranker. `None` makes `/level2` answer `503`: a server
+    /// without a model must not silently degrade into Level-1 ordering.
+    reranker: Option<Arc<dyn Reranker>>,
     running: AtomicBool,
     active: Mutex<usize>,
     drained: Condvar,
@@ -93,7 +104,7 @@ impl V2Server {
     /// A collection is a direct subdirectory holding a `v2_manifest.json`. One
     /// that cannot be opened aborts startup — a server that silently hides a
     /// broken collection serves answers that look complete and are not.
-    fn open(root_dir: &Path) -> Result<Self, V2Error> {
+    fn open(root_dir: &Path, reranker: Option<Arc<dyn Reranker>>) -> Result<Self, V2Error> {
         fs::create_dir_all(root_dir)?;
         let mut collections = HashMap::new();
         for entry in fs::read_dir(root_dir)? {
@@ -117,10 +128,19 @@ impl V2Server {
         Ok(Self {
             root_dir: root_dir.to_path_buf(),
             collections: RwLock::new(collections),
+            reranker,
             running: AtomicBool::new(true),
             active: Mutex::new(0),
             drained: Condvar::new(),
         })
+    }
+
+    /// Open `root_dir` with a Level-2 reranker attached.
+    pub fn with_reranker(
+        root_dir: impl AsRef<Path>,
+        reranker: Arc<dyn Reranker>,
+    ) -> Result<Self, V2Error> {
+        Self::open(root_dir.as_ref(), Some(reranker))
     }
 
     fn collection(&self, name: &str) -> Result<Arc<RwLock<V2Index>>, ApiError> {
@@ -212,12 +232,34 @@ pub fn start_in_background(
     root_dir: impl AsRef<Path>,
     addr: &str,
 ) -> Result<V2ServerHandle, V2Error> {
-    let server = Arc::new(V2Server::open(root_dir.as_ref())?);
+    start(root_dir.as_ref(), addr, None)
+}
+
+/// Like [`start_in_background`], with a Level-2 reranker attached.
+pub fn start_in_background_with_reranker(
+    root_dir: impl AsRef<Path>,
+    addr: &str,
+    reranker: Arc<dyn Reranker>,
+) -> Result<V2ServerHandle, V2Error> {
+    start(root_dir.as_ref(), addr, Some(reranker))
+}
+
+fn start(
+    root_dir: &Path,
+    addr: &str,
+    reranker: Option<Arc<dyn Reranker>>,
+) -> Result<V2ServerHandle, V2Error> {
+    let server = Arc::new(V2Server::open(root_dir, reranker)?);
     let listener = bind(addr)?;
     let local_addr = listener.local_addr()?;
     eprintln!(
-        "nvdb serve listening on http://{local_addr}/ ({} collections)",
-        server.collections.read().len()
+        "nvdb serve listening on http://{local_addr}/ ({} collections, reranker: {})",
+        server.collections.read().len(),
+        if server.reranker.is_some() {
+            "loaded"
+        } else {
+            "none"
+        }
     );
     let accept_server = Arc::clone(&server);
     let accept = std::thread::Builder::new()
@@ -232,12 +274,30 @@ pub fn start_in_background(
 
 /// Open `root_dir` and serve on `addr` until the listener fails. Blocks.
 pub fn serve_blocking(root_dir: impl AsRef<Path>, addr: &str) -> Result<(), V2Error> {
-    let server = Arc::new(V2Server::open(root_dir.as_ref())?);
+    serve(root_dir.as_ref(), addr, None)
+}
+
+/// Like [`serve_blocking`], with a Level-2 reranker attached.
+pub fn serve_blocking_with_reranker(
+    root_dir: impl AsRef<Path>,
+    addr: &str,
+    reranker: Arc<dyn Reranker>,
+) -> Result<(), V2Error> {
+    serve(root_dir.as_ref(), addr, Some(reranker))
+}
+
+fn serve(root_dir: &Path, addr: &str, reranker: Option<Arc<dyn Reranker>>) -> Result<(), V2Error> {
+    let server = Arc::new(V2Server::open(root_dir, reranker)?);
     let listener = bind(addr)?;
     eprintln!(
-        "nvdb serve listening on http://{}/ ({} collections)",
+        "nvdb serve listening on http://{}/ ({} collections, reranker: {})",
         listener.local_addr()?,
-        server.collections.read().len()
+        server.collections.read().len(),
+        if server.reranker.is_some() {
+            "loaded"
+        } else {
+            "none"
+        }
     );
     accept_loop(&listener, &server);
     Ok(())
@@ -620,6 +680,12 @@ fn dispatch(server: &V2Server, request: &Request) -> ApiResult {
         ("POST", ["v2", "collections", name, "attach_vectors"]) => {
             attach_vectors(server, name, request)
         }
+        ("GET", ["v2", "collections", name, "fingerprints"]) => fingerprints(server, name),
+        ("POST", ["v2", "collections", name, "integrity_check"]) => {
+            integrity_check(server, name, request)
+        }
+        ("POST", ["v2", "collections", name, "watermark"]) => set_watermark(server, name, request),
+        ("POST", ["v2", "collections", name, "level2"]) => level2(server, name, request),
         _ => Err(ApiError::new(
             404,
             "no_route",
@@ -633,6 +699,7 @@ fn health(server: &V2Server) -> ApiResult {
         "ok": true,
         "engine": "nvdb-v2",
         "collections": sorted_names(server),
+        "reranker_loaded": server.reranker.is_some(),
     }))
 }
 
@@ -900,6 +967,219 @@ fn attach_vectors(server: &V2Server, name: &str, request: &Request) -> ApiResult
     Ok(json!({
         "attached": attached,
         "vec_generation": index.vec_generation(),
+    }))
+}
+
+fn fingerprints(server: &V2Server, name: &str) -> ApiResult {
+    let collection = server.collection(name)?;
+    let index = collection.read();
+    let entries = index.fingerprint_entries();
+    Ok(json!({
+        "doc_count": index.doc_count(),
+        "watermark": index.manifest().watermark,
+        "entries": entries,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntegrityCheckBody {
+    expected: Vec<ExpectedFingerprint>,
+    #[serde(default)]
+    check_vectors: bool,
+}
+
+fn integrity_check(server: &V2Server, name: &str, request: &Request) -> ApiResult {
+    let body: IntegrityCheckBody = parse_body(request)?;
+    let collection = server.collection(name)?;
+    let index = collection.read();
+    let diff = index.integrity_check_entries(&body.expected, body.check_vectors);
+    Ok(json!(diff))
+}
+
+/// Wire shape of [`SyncWatermark`]: the degradation pair is optional on the
+/// wire so an ordinary (healthy) watermark is three short fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatermarkBody {
+    source_epoch_uuid: String,
+    synced_seq: u64,
+    #[serde(default)]
+    degraded: bool,
+    #[serde(default)]
+    degraded_reason: Option<String>,
+}
+
+fn set_watermark(server: &V2Server, name: &str, request: &Request) -> ApiResult {
+    let body: WatermarkBody = parse_body(request)?;
+    let watermark = SyncWatermark {
+        source_epoch_uuid: body.source_epoch_uuid,
+        synced_seq: body.synced_seq,
+        degraded: body.degraded,
+        degraded_reason: body.degraded_reason,
+    };
+    // The invariants are the caller's to satisfy, not to discover later at open.
+    watermark
+        .validate()
+        .map_err(|error| ApiError::bad_request("invalid_watermark", error.to_string()))?;
+    let collection = server.collection(name)?;
+    let mut index = collection.write();
+    index
+        .set_watermark(watermark.clone())
+        .map_err(ApiError::from_engine)?;
+    Ok(json!({ "ok": true, "watermark": watermark }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Level2Body {
+    query_text: String,
+    principals: Vec<String>,
+    hits: Vec<V2HybridHit>,
+    /// Authoritative text per document id, when the caller already has it.
+    #[serde(default)]
+    texts: Option<HashMap<String, String>>,
+    #[serde(default)]
+    shortlist: Option<usize>,
+    #[serde(default)]
+    rerank_weight: Option<f32>,
+    #[serde(default)]
+    relevance_floor: Option<f32>,
+}
+
+fn level2(server: &V2Server, name: &str, request: &Request) -> ApiResult {
+    let body: Level2Body = parse_body(request)?;
+    let collection = server.collection(name)?;
+    let index = collection.read();
+
+    // Fail closed, in this order: principals, then degradation, then a server
+    // that cannot rerank at all.
+    index
+        .ensure_readable(&body.principals)
+        .map_err(ApiError::from_engine)?;
+    let Some(reranker) = server.reranker.as_ref() else {
+        return Err(ApiError::new(
+            503,
+            "reranker_not_configured",
+            "this server runs without a reranker; start it with --reranker-model",
+        ));
+    };
+
+    let shortlist = body.shortlist.unwrap_or(DEFAULT_SHORTLIST);
+    if shortlist == 0 {
+        return Err(ApiError::bad_request(
+            "invalid_shortlist",
+            "shortlist must be greater than zero",
+        ));
+    }
+    let rerank_weight = body.rerank_weight.unwrap_or(DEFAULT_RERANK_WEIGHT);
+    if !rerank_weight.is_finite() || rerank_weight < 0.0 {
+        return Err(ApiError::bad_request(
+            "invalid_rerank_weight",
+            "rerank_weight must be finite and non-negative",
+        ));
+    }
+    let floor = body.relevance_floor.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    if !floor.is_finite() {
+        return Err(ApiError::bad_request(
+            "invalid_relevance_floor",
+            "relevance_floor must be finite",
+        ));
+    }
+
+    // Level 1 is evidence, not permission: the ACL overlay decides who may see
+    // a candidate, and a revoked document never reaches the reranker.
+    let principals: HashSet<&str> = body.principals.iter().map(String::as_str).collect();
+    let survivors: Vec<V2HybridHit> = body
+        .hits
+        .into_iter()
+        .filter(|hit| index.acl_overlay().is_visible(&hit.hit.id, &principals))
+        .take(shortlist)
+        .collect();
+
+    let candidate_texts: Vec<String> = survivors
+        .iter()
+        .map(|hit| {
+            body.texts
+                .as_ref()
+                .and_then(|texts| texts.get(&hit.hit.id))
+                .cloned()
+                .or_else(|| hit.hit.excerpt.clone())
+                .unwrap_or_else(|| {
+                    format!("{} {}", hit.hit.title, hit.hit.path)
+                        .trim()
+                        .to_string()
+                })
+        })
+        .collect();
+
+    let scores: Vec<f32> = if survivors.is_empty() {
+        Vec::new()
+    } else {
+        let documents: Vec<&str> = candidate_texts.iter().map(String::as_str).collect();
+        let scores = reranker
+            .score(&body.query_text, &documents)
+            .map_err(|error| ApiError::new(500, "rerank_failed", error.to_string()))?;
+        if scores.len() != documents.len() {
+            return Err(ApiError::new(
+                500,
+                "rerank_failed",
+                format!(
+                    "reranker returned {} scores for {} documents",
+                    scores.len(),
+                    documents.len()
+                ),
+            ));
+        }
+        if scores.iter().any(|score| !score.is_finite()) {
+            return Err(ApiError::new(
+                500,
+                "rerank_failed",
+                "reranker returned a non-finite score",
+            ));
+        }
+        scores
+    };
+
+    // Weighted RRF over the Level-1 order (weight 1.0) and the reranker order.
+    let mut order: Vec<f32> = (0..survivors.len())
+        .map(|index| 1.0 / (LEVEL2_RRF_K + (index + 1) as f32))
+        .collect();
+    if !scores.is_empty() {
+        let mut rerank_order: Vec<usize> = (0..survivors.len()).collect();
+        rerank_order.sort_by(|left, right| {
+            scores[*right]
+                .partial_cmp(&scores[*left])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.cmp(right))
+        });
+        for (rank, index) in rerank_order.into_iter().enumerate() {
+            order[index] += rerank_weight / (LEVEL2_RRF_K + (rank + 1) as f32);
+        }
+    }
+    let mut positions: Vec<usize> = (0..survivors.len()).collect();
+    positions.sort_by(|left, right| {
+        order[*right]
+            .partial_cmp(&order[*left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cmp(right))
+    });
+
+    let best_rerank_score = scores.iter().copied().reduce(f32::max);
+    let rejected = best_rerank_score.map(|best| best < floor).unwrap_or(false);
+
+    let mut hits: Vec<V2Level2Hit> = Vec::with_capacity(survivors.len());
+    for index in positions {
+        hits.push(V2Level2Hit {
+            hybrid: survivors[index].clone(),
+            rerank_score: scores.get(index).copied(),
+            hydrated_text: Some(candidate_texts[index].clone()),
+        });
+    }
+    Ok(json!(V2Level2Result {
+        rejected,
+        best_rerank_score,
+        hits,
     }))
 }
 

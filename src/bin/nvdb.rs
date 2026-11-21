@@ -65,6 +65,10 @@ fn print_usage() {
     eprintln!("  --dir <path>     Collection root directory (each collection is a subdirectory)");
     eprintln!("  --host <addr>    Bind host (default 127.0.0.1; 0.0.0.0 for LAN)");
     eprintln!("  --port <n>       Port (default 3510)");
+    eprintln!(
+        "  --reranker-model <dir>  Level-2 reranker: <dir>/model.onnx + <dir>/tokenizer.json"
+    );
+    eprintln!("                          (requires a build with --features rerank-onnx)");
 }
 
 fn handle_init(args: &[String]) {
@@ -849,7 +853,7 @@ fn option_value(args: &[String], index: usize, flag: &str, usage: &str) -> Strin
 }
 
 fn handle_serve(args: &[String]) {
-    let usage = "Usage: nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510]";
+    let usage = "Usage: nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510] [--reranker-model <dir>]";
     if args.is_empty() {
         eprintln!("{}", usage);
         process::exit(EXIT_GENERAL_ERROR);
@@ -858,6 +862,7 @@ fn handle_serve(args: &[String]) {
     let mut dir: Option<String> = None;
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 3510;
+    let mut reranker_model: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -882,6 +887,10 @@ fn handle_serve(args: &[String]) {
                 };
                 i += 2;
             }
+            "--reranker-model" => {
+                reranker_model = Some(option_value(args, i, flag, usage));
+                i += 2;
+            }
             other => {
                 eprintln!("Error: unknown serve option: {}", other);
                 eprintln!("{}", usage);
@@ -897,11 +906,54 @@ fn handle_serve(args: &[String]) {
     };
 
     let addr = format!("{}:{}", host, port);
-    if let Err(e) = nvdb::v2::server::serve_blocking(Path::new(&dir), &addr) {
+    let root = Path::new(&dir);
+    let result = match reranker_model.as_deref() {
+        None => nvdb::v2::server::serve_blocking(root, &addr),
+        Some(model_dir) => {
+            let reranker = load_reranker(model_dir);
+            nvdb::v2::server::serve_blocking_with_reranker(root, &addr, reranker)
+        }
+    };
+    if let Err(e) = result {
         eprintln!("Server error: {}", e);
         process::exit(EXIT_GENERAL_ERROR);
     }
     process::exit(EXIT_SUCCESS);
+}
+
+/// Load the Level-2 reranker from `<dir>/model.onnx` + `<dir>/tokenizer.json`.
+///
+/// Loading failure is fatal: a server that starts without the reranker it was
+/// asked for would answer every `level2` request with `503` while looking healthy.
+#[cfg(feature = "rerank-onnx")]
+fn load_reranker(model_dir: &str) -> Arc<dyn nvdb::Reranker> {
+    let dir = Path::new(model_dir);
+    let config = nvdb::OnnxRerankerConfig::new(
+        dir.join("model.onnx"),
+        dir.join("tokenizer.json"),
+    );
+    match nvdb::OnnxReranker::load(config) {
+        Ok(reranker) => Arc::new(reranker),
+        Err(error) => {
+            eprintln!(
+                "Error: cannot load the reranker from '{}': {}",
+                dir.display(),
+                error
+            );
+            process::exit(EXIT_GENERAL_ERROR);
+        }
+    }
+}
+
+/// `--reranker-model` without the feature is a startup error, not a silent
+/// downgrade to Level-1 ordering.
+#[cfg(not(feature = "rerank-onnx"))]
+fn load_reranker(model_dir: &str) -> Arc<dyn nvdb::Reranker> {
+    eprintln!(
+        "Error: --reranker-model '{}' requires an nvdb built with --features rerank-onnx; this binary has no reranker backend.",
+        model_dir
+    );
+    process::exit(EXIT_GENERAL_ERROR);
 }
 
 fn handle_rebuild_index(args: &[String]) {

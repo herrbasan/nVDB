@@ -9,8 +9,10 @@ use crate::Result;
 /// Scores candidate documents against the original query.
 ///
 /// Implementations must return exactly one finite score per document. Higher
-/// means more relevant.
-pub trait Reranker {
+/// means more relevant. A reranker is shared: the HTTP front end holds one
+/// behind an `Arc` and serves every connection from it, so `Send + Sync` is
+/// part of the contract, not an implementation detail.
+pub trait Reranker: Send + Sync {
     /// Score documents in input order.
     fn score(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>>;
 }
