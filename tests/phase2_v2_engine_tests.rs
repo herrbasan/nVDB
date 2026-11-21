@@ -548,6 +548,46 @@ fn exact_title_and_path_identifiers_both_match() {
     assert_eq!(ids(&filtered), vec!["by_path".to_string()]);
 }
 
+#[test]
+fn exact_body_directive_outranks_partial_title_and_path_matches() {
+    let temp = TempDir::new().unwrap();
+    let mut index = open_index(&temp);
+
+    let mut author_bio = doc(
+        "author_bio",
+        "David A. Renelt",
+        "Author profile for David A. Renelt, essays and biography.",
+    );
+    author_bio.path = "blog/authors/david-a-renelt.md".to_string();
+    author_bio.name = "david-a-renelt.md".to_string();
+
+    let mut handover = doc(
+        "handover",
+        "nSpeech Dialogue Mode Handover",
+        "Example speaker block:\n<!-- mb:block preset=narration:david-a-renelt -->\nSpoken text.\n<!-- mb:/block -->",
+    );
+    handover.path = "scratch/nspeech-dialogue-mode-handover.md".to_string();
+    handover.name = "nspeech-dialogue-mode-handover.md".to_string();
+
+    index.upsert_batch(vec![author_bio, handover]).unwrap();
+    index.commit().unwrap();
+
+    let hits = index
+        .search(
+            &V2Query::new("preset=narration:david-a-renelt")
+                .principals(["public"])
+                .fuzzy_edits(1)
+                .top_k(5),
+        )
+        .unwrap();
+    assert_eq!(
+        hits.first().map(|h| h.id.as_str()),
+        Some("handover"),
+        "verbatim directive match in body must outrank partial title/path hits: {:?}",
+        ids(&hits)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. Columnar filters.
 // ---------------------------------------------------------------------------

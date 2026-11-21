@@ -125,17 +125,25 @@ const FUZZY_MIN_TERM_CHARS: usize = 4;
 /// cost for no ranking benefit.
 const FUZZY_MAX_TERMS: usize = 6;
 
-/// Score multiplier of the multi-term phrase clause, relative to the field weight.
-const PHRASE_BOOST: f32 = 1.5;
+/// Score multiplier of the multi-term title phrase clause, relative to the title weight.
+const TITLE_PHRASE_BOOST: f32 = 2.0;
 
-/// Shortest query (in distinct terms) that gets a phrase clause.
+/// Score multiplier of the multi-term body phrase clause, relative to the body weight.
+/// High enough that an exact verbatim multi-token match in `body` (e.g. a code/directive
+/// literal like `preset=narration:david-a-renelt`) outranks partial-subset matches in
+/// `title` + `path` + `name` (`herrbasan/nVDB#4`, `herrbasan/mcp_server#88`).
+const BODY_PHRASE_BOOST: f32 = 10.0;
+
+/// Bonus multiplier for documents that contain every distinct query term (all-terms
+/// conjunction across title/headings/path/name/body), preventing partial title/path hits
+/// from drowning out full-coverage matches.
+const ALL_TERMS_BOOST: f32 = 4.0;
+
+/// Shortest query (in distinct terms) that gets a phrase or all-terms conjunction clause.
 const PHRASE_MIN_TERMS: usize = 2;
 
-/// Longest query (in distinct terms) that gets a phrase clause.
-///
-/// Beyond this the phrase is too long to be a meaningful "the author meant this
-/// verbatim" signal, and the positions check buys nothing.
-const PHRASE_MAX_TERMS: usize = 6;
+/// Longest query (in distinct terms) that gets a phrase or all-terms conjunction clause.
+const PHRASE_MAX_TERMS: usize = 8;
 
 /// Names that cannot be promoted, because the engine already uses them.
 const RESERVED_FIELD_NAMES: &[&str] = &[
@@ -988,11 +996,12 @@ impl V2Index {
             validated.push((entry.id.clone(), digest, index));
         }
 
+        let mut newly_added: Vec<([u8; 32], String)> = Vec::new();
         for (_, digest, index) in &validated {
             if !self.vectors.contains(digest, &lane.model_version) {
                 self.vectors
                     .insert(*digest, &lane.model_version, entries[*index].vector.clone());
-                self.vectors_dirty = true;
+                newly_added.push((*digest, lane.model_version.clone()));
             }
         }
         for (id, digest, _) in &validated {
@@ -1000,7 +1009,21 @@ impl V2Index {
                 self.vec_map_dirty = true;
             }
         }
-        self.persist_state()?;
+
+        // Persist only vector state: append new vectors in O(batch) I/O, then
+        // atomically swap vec_map + manifest without rewriting unchanged ACL or
+        // fingerprint sidecars (`herrbasan/nVDB#3`).
+        if !newly_added.is_empty() {
+            self.vectors.append_records(&self.dir, &newly_added)?;
+        }
+        if self.vec_map_dirty {
+            let vec_generation = self.vec_map.generation();
+            self.vec_map.save_atomic(&self.dir, vec_generation)?;
+            self.manifest.vec_generation = vec_generation;
+            V2Manifest::save_atomic(&self.manifest, &self.dir)?;
+            VecMap::cleanup_superseded(&self.dir, vec_generation)?;
+            self.vec_map_dirty = false;
+        }
         Ok(validated.len())
     }
 
@@ -1933,11 +1956,11 @@ impl V2Index {
             }
         }
         if (PHRASE_MIN_TERMS..=PHRASE_MAX_TERMS).contains(&ordered.len()) {
-            for (field, weight) in [
-                (self.fields.title, weights.title),
-                (self.fields.body, weights.body),
+            for (field, boost_weight) in [
+                (self.fields.title, weights.title * TITLE_PHRASE_BOOST),
+                (self.fields.body, weights.body * BODY_PHRASE_BOOST),
             ] {
-                if weight <= 0.0 {
+                if boost_weight <= 0.0 {
                     continue;
                 }
                 let terms: Vec<Term> = ordered
@@ -1946,7 +1969,36 @@ impl V2Index {
                     .collect();
                 clauses.push((
                     Occur::Should,
-                    boost(Box::new(PhraseQuery::new(terms)), weight * PHRASE_BOOST),
+                    boost(Box::new(PhraseQuery::new(terms)), boost_weight),
+                ));
+            }
+        }
+        if (PHRASE_MIN_TERMS..=PHRASE_MAX_TERMS).contains(&words.len()) {
+            let coverage_fields: Vec<Field> = [
+                (self.fields.title, weights.title),
+                (self.fields.headings, weights.headings),
+                (self.fields.path, weights.path),
+                (self.fields.name, weights.name),
+                (self.fields.body, weights.body),
+            ]
+            .into_iter()
+            .filter(|(_, w)| *w > 0.0)
+            .map(|(f, _)| f)
+            .collect();
+            if !coverage_fields.is_empty() {
+                let must_terms: Vec<(Occur, Box<dyn Query>)> = words
+                    .iter()
+                    .map(|word| {
+                        let any_field: Vec<(Occur, Box<dyn Query>)> = coverage_fields
+                            .iter()
+                            .map(|field| (Occur::Should, term_query(*field, word)))
+                            .collect();
+                        (Occur::Must, Box::new(BooleanQuery::new(any_field)) as Box<dyn Query>)
+                    })
+                    .collect();
+                clauses.push((
+                    Occur::Should,
+                    boost(Box::new(BooleanQuery::new(must_terms)), ALL_TERMS_BOOST),
                 ));
             }
         }

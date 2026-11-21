@@ -22,6 +22,8 @@
 //! durable work queue that could drift from the index.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -41,8 +43,11 @@ pub const VEC_MAP_SUFFIX: &str = ".bin";
 /// Magic bytes of `vectors.bin`.
 const VECTORS_MAGIC: &[u8; 4] = b"NVVC";
 
-/// Format version of `vectors.bin`.
-const VECTORS_FORMAT_VERSION: u8 = 1;
+/// Legacy fixed-count format version (read-compatible with existing files).
+const VECTORS_FORMAT_VERSION_V1: u8 = 1;
+
+/// Append-only format version (`magic | 2 | [record]*` until EOF).
+const VECTORS_FORMAT_VERSION_V2: u8 = 2;
 
 /// Magic bytes of a persisted vec-map generation.
 const VEC_MAP_MAGIC: &[u8; 4] = b"NVMV";
@@ -128,29 +133,96 @@ impl VectorStore {
         Self::from_bytes(&bytes)
     }
 
-    /// Persist the store atomically as `vectors.bin`.
+    /// Persist the entire store atomically as a compacted v2 `vectors.bin`.
     pub fn save_atomic(&self, dir: &Path) -> Result<(), V2Error> {
         write_atomic(&dir.join(VECTORS_FILE), &self.to_bytes())
     }
 
-    /// Serialise: `magic | version | count | (digest, model, dim, f32 × dim)`.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes: Vec<u8> = Vec::with_capacity(9 + self.entries.len() * 128);
-        bytes.extend_from_slice(VECTORS_MAGIC);
-        bytes.push(VECTORS_FORMAT_VERSION);
-        bytes.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-        for ((digest, model_version), vector) in &self.entries {
-            bytes.extend_from_slice(digest);
-            push_str(&mut bytes, model_version);
-            bytes.extend_from_slice(&(vector.len() as u32).to_le_bytes());
-            for value in vector {
-                bytes.extend_from_slice(&value.to_le_bytes());
+    /// Append newly inserted `(digest, model_version)` records to `vectors.bin`
+    /// in `O(batch)` I/O instead of rewriting the full file (`herrbasan/nVDB#3`).
+    ///
+    /// - Missing file: creates a fresh v2 file with header + records + `sync_all`.
+    /// - Existing v2 file: appends only the new records + `sync_all`.
+    /// - Legacy v1 file: upgrades once via `save_atomic` (v2); subsequent calls append.
+    pub fn append_records(
+        &self,
+        dir: &Path,
+        keys: &[(ContentDigest, String)],
+    ) -> Result<(), V2Error> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let path = dir.join(VECTORS_FILE);
+        let existing_version = match std::fs::File::open(&path) {
+            Ok(mut file) => {
+                let mut header = [0u8; 5];
+                match file.read_exact(&mut header) {
+                    Ok(()) => {
+                        if &header[..4] != VECTORS_MAGIC {
+                            return Err(corrupt("vectors.bin has bad magic bytes"));
+                        }
+                        Some(header[4])
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Err(corrupt("vectors.bin is truncated before its header"));
+                    }
+                    Err(error) => return Err(V2Error::Io(error)),
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(V2Error::Io(error)),
+        };
+
+        match existing_version {
+            Some(VECTORS_FORMAT_VERSION_V1) => {
+                // One-time atomic upgrade from v1 (fixed count) to v2 (append-only).
+                return self.save_atomic(dir);
+            }
+            Some(VECTORS_FORMAT_VERSION_V2) => {
+                let mut buf = Vec::with_capacity(keys.len() * 128);
+                for (digest, model_version) in keys {
+                    let vector = self
+                        .entries
+                        .get(&(*digest, model_version.clone()))
+                        .ok_or_else(|| corrupt("append_records called for key missing from VectorStore"))?;
+                    encode_record(&mut buf, digest, model_version, vector);
+                }
+                let mut file = OpenOptions::new().append(true).open(&path)?;
+                file.write_all(&buf)?;
+                file.sync_all()?;
+                Ok(())
+            }
+            None => {
+                let mut buf = Vec::with_capacity(5 + keys.len() * 128);
+                buf.extend_from_slice(VECTORS_MAGIC);
+                buf.push(VECTORS_FORMAT_VERSION_V2);
+                for (digest, model_version) in keys {
+                    let vector = self
+                        .entries
+                        .get(&(*digest, model_version.clone()))
+                        .ok_or_else(|| corrupt("append_records called for key missing from VectorStore"))?;
+                    encode_record(&mut buf, digest, model_version, vector);
+                }
+                write_atomic(&path, &buf)
+            }
+            Some(other) => Err(corrupt(&format!(
+                "vectors.bin uses unsupported version {other}"
+            ))),
+        }
+    }
+
+    /// Serialise in v2 append-only format: `magic | 2 | (digest, model, dim, f32 × dim)*`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::with_capacity(5 + self.entries.len() * 128);
+        bytes.extend_from_slice(VECTORS_MAGIC);
+        bytes.push(VECTORS_FORMAT_VERSION_V2);
+        for ((digest, model_version), vector) in &self.entries {
+            encode_record(&mut bytes, digest, model_version, vector);
         }
         bytes
     }
 
-    /// Parse bytes written by [`VectorStore::to_bytes`].
+    /// Parse bytes written in v1 (fixed-count) or v2 (append-only) format.
     ///
     /// Every invariant the read path relies on is enforced here — a truncated
     /// file, an unknown version, a zero dimension, a duplicate key or a
@@ -167,45 +239,74 @@ impl VectorStore {
         let version = reader
             .u8()
             .ok_or_else(|| corrupt("vectors.bin has no format version"))?;
-        if version != VECTORS_FORMAT_VERSION {
-            return Err(corrupt(&format!(
-                "vectors.bin uses unsupported version {version}"
-            )));
-        }
-        let count = reader
-            .u32()
-            .ok_or_else(|| corrupt("vectors.bin has no count"))? as usize;
-        let mut entries: HashMap<VectorKey, Vec<f32>> = HashMap::with_capacity(count);
-        for _ in 0..count {
-            let digest = reader.digest()?;
-            let model_version = reader
-                .string()
-                .ok_or_else(|| corrupt("vectors.bin has a truncated model version"))?;
-            let dim = reader
-                .u32()
-                .ok_or_else(|| corrupt("vectors.bin has a truncated dimension"))?
-                as usize;
-            if dim == 0 {
-                return Err(corrupt("vectors.bin holds a zero-dimension embedding"));
-            }
-            let mut vector: Vec<f32> = Vec::with_capacity(dim);
-            for _ in 0..dim {
-                let value = reader
-                    .f32()
-                    .ok_or_else(|| corrupt("vectors.bin has a truncated embedding"))?;
-                if !value.is_finite() {
-                    return Err(corrupt("vectors.bin holds a non-finite value"));
+
+        match version {
+            VECTORS_FORMAT_VERSION_V1 => {
+                let count = reader
+                    .u32()
+                    .ok_or_else(|| corrupt("vectors.bin has no count"))?
+                    as usize;
+                let mut entries: HashMap<VectorKey, Vec<f32>> = HashMap::with_capacity(count);
+                for _ in 0..count {
+                    let (key, vector) = decode_record(&mut reader)?;
+                    if entries.insert(key, vector).is_some() {
+                        return Err(corrupt(
+                            "vectors.bin holds the same (content_hash, model_version) twice",
+                        ));
+                    }
                 }
-                vector.push(value);
+                Ok(Self { entries })
             }
-            if entries.insert((digest, model_version), vector).is_some() {
-                return Err(corrupt(
-                    "vectors.bin holds the same (content_hash, model_version) twice",
-                ));
+            VECTORS_FORMAT_VERSION_V2 => {
+                let mut entries: HashMap<VectorKey, Vec<f32>> = HashMap::new();
+                while reader.remaining() > 0 {
+                    let (key, vector) = decode_record(&mut reader)?;
+                    if entries.insert(key, vector).is_some() {
+                        return Err(corrupt(
+                            "vectors.bin holds the same (content_hash, model_version) twice",
+                        ));
+                    }
+                }
+                Ok(Self { entries })
             }
+            other => Err(corrupt(&format!(
+                "vectors.bin uses unsupported version {other}"
+            ))),
         }
-        Ok(Self { entries })
     }
+}
+
+fn encode_record(bytes: &mut Vec<u8>, digest: &ContentDigest, model_version: &str, vector: &[f32]) {
+    bytes.extend_from_slice(digest);
+    push_str(bytes, model_version);
+    bytes.extend_from_slice(&(vector.len() as u32).to_le_bytes());
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn decode_record(reader: &mut ByteReader<'_>) -> Result<(VectorKey, Vec<f32>), V2Error> {
+    let digest = reader.digest()?;
+    let model_version = reader
+        .string()
+        .ok_or_else(|| corrupt("vectors.bin has a truncated model version"))?;
+    let dim = reader
+        .u32()
+        .ok_or_else(|| corrupt("vectors.bin has a truncated dimension"))? as usize;
+    if dim == 0 {
+        return Err(corrupt("vectors.bin holds a zero-dimension embedding"));
+    }
+    let mut vector: Vec<f32> = Vec::with_capacity(dim);
+    for _ in 0..dim {
+        let value = reader
+            .f32()
+            .ok_or_else(|| corrupt("vectors.bin has a truncated embedding"))?;
+        if !value.is_finite() {
+            return Err(corrupt("vectors.bin holds a non-finite value"));
+        }
+        vector.push(value);
+    }
+    Ok(((digest, model_version), vector))
 }
 
 /// Generation-stamped `doc_id -> content_hash` link map.
@@ -476,6 +577,10 @@ impl<'a> ByteReader<'a> {
         Self { bytes, position: 0 }
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
     fn take(&mut self, count: usize) -> Option<&'a [u8]> {
         let end = self.position.checked_add(count)?;
         let slice = self.bytes.get(self.position..end)?;
@@ -619,5 +724,56 @@ mod tests {
         assert_eq!(hex_to_digest(&hex.to_uppercase()), Some(digest));
         assert_eq!(hex_to_digest("not-a-hash"), None);
         assert_eq!(hex_to_digest(&hex[..62]), None);
+    }
+
+    #[test]
+    fn append_records_grows_v2_incrementally() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+        let mut store = VectorStore::new();
+        store.insert([1u8; 32], "m1", vec![1.0, 2.0]);
+        store
+            .append_records(dir, &[([1u8; 32], "m1".to_string())])
+            .expect("initial v2 write");
+        let len_after_one = std::fs::metadata(dir.join(VECTORS_FILE)).unwrap().len();
+
+        store.insert([2u8; 32], "m1", vec![3.0, 4.0]);
+        store
+            .append_records(dir, &[([2u8; 32], "m1".to_string())])
+            .expect("second v2 append");
+        let len_after_two = std::fs::metadata(dir.join(VECTORS_FILE)).unwrap().len();
+        assert!(len_after_two > len_after_one);
+
+        let reloaded = VectorStore::load(dir).expect("reload v2");
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded.get(&[1u8; 32], "m1"), Some(&[1.0f32, 2.0][..]));
+        assert_eq!(reloaded.get(&[2u8; 32], "m1"), Some(&[3.0f32, 4.0][..]));
+    }
+
+    #[test]
+    fn append_records_upgrades_legacy_v1_in_place() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+        // Hand-craft a legacy v1 file with 1 record
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(VECTORS_MAGIC);
+        v1.push(VECTORS_FORMAT_VERSION_V1);
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        encode_record(&mut v1, &[9u8; 32], "m1", &[0.5, 0.25]);
+        std::fs::write(dir.join(VECTORS_FILE), &v1).unwrap();
+
+        let mut store = VectorStore::load(dir).expect("load legacy v1");
+        assert_eq!(store.len(), 1);
+        store.insert([10u8; 32], "m1", vec![0.75, 1.25]);
+        store
+            .append_records(dir, &[([10u8; 32], "m1".to_string())])
+            .expect("upgrade v1 to v2");
+
+        let raw = std::fs::read(dir.join(VECTORS_FILE)).unwrap();
+        assert_eq!(raw[4], VECTORS_FORMAT_VERSION_V2);
+        let reloaded = VectorStore::load(dir).expect("reload upgraded v2");
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded.get(&[9u8; 32], "m1"), Some(&[0.5f32, 0.25][..]));
+        assert_eq!(reloaded.get(&[10u8; 32], "m1"), Some(&[0.75f32, 1.25][..]));
     }
 }
