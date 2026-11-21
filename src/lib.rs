@@ -54,6 +54,8 @@ pub mod rerank;
 pub mod rerank_onnx;
 pub mod search;
 pub mod segment;
+pub mod sync;
+pub mod v2;
 pub mod wal;
 
 pub use crate::compaction::CompactionResult;

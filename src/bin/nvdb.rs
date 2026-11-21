@@ -32,6 +32,7 @@ fn main() {
         "config" => handle_config(&args[2..]),
         "search" => handle_search(&args[2..]),
         "rebuild-index" => handle_rebuild_index(&args[2..]),
+        "serve" => handle_serve(&args[2..]),
         _ => {
             eprintln!("Unknown command: {}", command);
             print_usage();
@@ -58,6 +59,12 @@ fn print_usage() {
     eprintln!("  config <get|set> ...          Manage metadata/config");
     eprintln!("  search <path> <vector>        Run a vector search");
     eprintln!("  rebuild-index <path>          Rebuild the HNSW graph");
+    eprintln!("  serve --dir <path>            Run the v2 HTTP server (default 127.0.0.1:3510)");
+    eprintln!("");
+    eprintln!("Serve options:");
+    eprintln!("  --dir <path>     Collection root directory (each collection is a subdirectory)");
+    eprintln!("  --host <addr>    Bind host (default 127.0.0.1; 0.0.0.0 for LAN)");
+    eprintln!("  --port <n>       Port (default 3510)");
 }
 
 fn handle_init(args: &[String]) {
@@ -826,6 +833,73 @@ fn handle_search(args: &[String]) {
             eprintln!("Search failed: {}", e);
             process::exit(EXIT_GENERAL_ERROR);
         }
+    }
+    process::exit(EXIT_SUCCESS);
+}
+
+fn option_value(args: &[String], index: usize, flag: &str, usage: &str) -> String {
+    match args.get(index + 1) {
+        Some(value) => value.clone(),
+        None => {
+            eprintln!("Error: {} requires a value", flag);
+            eprintln!("{}", usage);
+            process::exit(EXIT_GENERAL_ERROR);
+        }
+    }
+}
+
+fn handle_serve(args: &[String]) {
+    let usage = "Usage: nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510]";
+    if args.is_empty() {
+        eprintln!("{}", usage);
+        process::exit(EXIT_GENERAL_ERROR);
+    }
+
+    let mut dir: Option<String> = None;
+    let mut host = "127.0.0.1".to_string();
+    let mut port: u16 = 3510;
+
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            "--dir" => {
+                dir = Some(option_value(args, i, flag, usage));
+                i += 2;
+            }
+            "--host" => {
+                host = option_value(args, i, flag, usage);
+                i += 2;
+            }
+            "--port" => {
+                let raw = option_value(args, i, flag, usage);
+                port = match raw.parse::<u16>() {
+                    Ok(port) if port > 0 => port,
+                    _ => {
+                        eprintln!("Error: --port must be an integer in 1..=65535, got '{}'", raw);
+                        process::exit(EXIT_GENERAL_ERROR);
+                    }
+                };
+                i += 2;
+            }
+            other => {
+                eprintln!("Error: unknown serve option: {}", other);
+                eprintln!("{}", usage);
+                process::exit(EXIT_GENERAL_ERROR);
+            }
+        }
+    }
+
+    let Some(dir) = dir else {
+        eprintln!("Error: --dir is required");
+        eprintln!("{}", usage);
+        process::exit(EXIT_GENERAL_ERROR);
+    };
+
+    let addr = format!("{}:{}", host, port);
+    if let Err(e) = nvdb::v2::server::serve_blocking(Path::new(&dir), &addr) {
+        eprintln!("Server error: {}", e);
+        process::exit(EXIT_GENERAL_ERROR);
     }
     process::exit(EXIT_SUCCESS);
 }

@@ -1,8 +1,8 @@
 # nVDB Test Documentation
 
-> **Last Updated:** 2026-02-14 21:15:00+01:00  
-> **Phase:** 5 — Maintenance: Compaction  
-> **Commit:** Phase 5 complete (Compaction + crash safety)
+> **Last Updated:** 2026-11-21  
+> **Phase:** 3 — Unified hybrid search, `content_hash`-keyed vectors and Level-2 refinement (`src/v2/`)  
+> **Commit:** Phase 3 (`src/v2/vectors.rs`, `src/v2/level2.rs`, hybrid search) + `tests/phase3_v2_hybrid_tests.rs`
 
 ## Overview
 
@@ -14,12 +14,18 @@ This document describes the test suite for nVDB. Tests are organized by componen
 
 ```
 tests/
+├── phase0_sync_contract_tests.rs # Sync/snapshot/ACL/revision contract tests
+├── phase2_v2_engine_tests.rs    # v2 lexical engine (Tantivy) integration tests
+├── phase3_v2_hybrid_tests.rs    # v2 hybrid search, vectors, Level-2 refinement
 ├── phase1a_segment_tests.rs    # Segment file format tests
 ├── phase1a_locking_tests.rs    # Multi-process locking tests
 ├── phase2_search_tests.rs      # Exact similarity search tests
 ├── phase3_hnsw_tests.rs        # HNSW approximate search tests
 ├── phase4_filter_tests.rs      # Filter DSL integration tests
 ├── phase5_compaction_tests.rs  # Compaction integration tests
+├── lexical_tests.rs            # Lexical index tests
+├── lexical_collection_tests.rs # Collection-level lexical tests
+├── hybrid_search_tests.rs      # Hybrid (lexical + vector) retrieval tests
 └── (unit tests in src/*.rs)    # Module-level unit tests
 ```
 
@@ -29,9 +35,13 @@ tests/
 
 ```bash
 # All tests
-cargo test  # 157 tests passing
+cargo test  # lib + every integration suite
 
 # Specific test suite
+cargo test --test phase0_sync_contract_tests
+cargo test --test phase2_v2_engine_tests
+cargo test --test phase2_v2_server_tests
+cargo test --test phase3_v2_hybrid_tests
 cargo test --test phase1a_segment_tests
 cargo test --test phase1a_locking_tests
 cargo test --test phase2_search_tests
@@ -45,6 +55,146 @@ cargo test -- --nocapture
 # Release mode (for performance validation)
 cargo test --release
 ```
+
+---
+
+## Phase 0: Sync, Snapshot, ACL & Revision Contract Tests
+
+### Contract Tests (`tests/phase0_sync_contract_tests.rs`)
+
+Phase 0 has its own exit gate: the sync/crash/revocation contract must be green
+before any index-engine code is written on top of it. The suite drives
+`nvdb::sync::SyncCoordinator` through a journal-backed `SourceConnector` fake.
+
+| Test | Purpose | Success Criteria |
+|------|---------|------------------|
+| `apply_failure_degrades_index_and_heals_after_restart` | Dual-write apply failure | Injection at seq N leaves `synced_seq = N-1`, `degraded = true` (persisted); queries fail `IndexDegraded`; later sync rebuilds and serves |
+| `backup_restore_behind_watermark_rebuilds_and_drops_phantoms` | Restored backup (`synced_seq > last_seq`) | Refuses incremental catch-up, rebuilds from snapshot, post-backup docs disappear |
+| `new_source_epoch_rebuilds_even_with_higher_head` | Epoch divergence | A new `source_epoch_uuid` with a higher head still forces a clean rebuild |
+| `compacted_cursor_rebuilds_but_caught_up_index_does_not` | Compaction cursor expiry | `CursorExpired` triggers a rebuild; an already-caught-up index returns `UpToDate` without taking a snapshot |
+| `acl_revocation_fails_closed_before_and_after_sync` | Fail-closed ACL at every layer | Empty principals → `MissingPrincipals`; behind-source index → `BootHealIncomplete` (revoked doc never served); Level-2 hydration re-checks source ACL → `AclDenied`; after sync the doc is invisible |
+| `envelope_hash_gates_updates_content_hash_gates_vectors` | Hash separation + vector CAS | ACL/metadata-only updates change `envelope_hash` but reuse the vector; text edits invalidate it; no-op replays are skipped; stale attach (old content hash or deleted doc) → `StaleVectorCas`; a stale batch attaches nothing |
+| `rebuild_catches_up_mutations_landing_after_the_snapshot` | Concurrent rebuild | Insert/delete/update/ACL mutations after `snapshot_at()` are replayed via `changes_since`, ending in exact authoritative state |
+
+**Key Invariants Verified:**
+- Watermark commits are contiguous; failures degrade instead of diverging
+- Two hashes stay separated: ACL/metadata updates are never skipped, vectors are never re-paid for
+- Reads fail closed on degraded state, empty principals, and any catch-up lag
+- Level-2 hydration trusts only the authoritative source for access decisions
+
+---
+
+## Phase 2 (General Indexer): Lexical Retrieval Engine (`tests/phase2_v2_engine_tests.rs`)
+
+Phase 2 embeds Tantivy (MIT, pure Rust) behind `nvdb::v2`. The suite runs against
+a real `V2Index` on disk, with a journal-backed `SourceConnector` fake that
+carries real `V2Document`s (so hashes and ACLs are the same ones the engine
+computes).
+
+| Test | Purpose | Success Criteria |
+|------|---------|------------------|
+| `german_compounds_match_in_both_directions` | Frozen lexicon + DP splitter wired into `body_parts` | `Förderprogramm`, `Datenschutzrichtlinie`, `Forschungszulage`, `Anwendungshandbuch` decompound as expected; compound query reaches the component document **and** component query reaches the compound document; the full compound title still ranks first |
+| `compound_ranking_is_deterministic_across_rebuild_and_incremental` | Write-path independence | Six compound queries return identical id order whether built by `upsert` or by a Phase 0 snapshot rebuild |
+| `one_edit_typos_are_tolerated_without_breaking_exact_title_ranking` | `FuzzyTermQuery` distance 1, transposition cost 1 | `Conciousness` (no fuzzy) matches only the misspelled doc; with `fuzzy_edits(1)` it also finds the correct one; the correctly spelled query keeps the exact-title doc at rank 1 |
+| `exact_title_and_path_identifiers_both_match` | `title_exact` + `nvdb_identifier` | `Quarterly Report` finds the exact-title doc and the `docs/q1/quarterly-report.pdf` doc, never the unrelated one; the exact title ranks first; `ext("pdf")` isolates the path match |
+| `columnar_filters_narrow_the_candidate_set` | `Occur::Must` columnar filters | `ext(".md")` == `ext("md")`; `kind`, `folder`, `created_at`/`updated_at` ranges, and promoted `I64`/`String`/`Bool`/`F64` columns all narrow correctly; unknown column → `InvalidQuery`; wrong type → `PromotedFieldType`; range on a string → `InvalidQuery` |
+| `acl_overlay_is_authoritative_and_updates_without_reindexing` | Authoritative ACL + ACL-only fast path | Empty principals → `MissingPrincipals`; `update_acl_only` is visible immediately with **no** reader growth (no re-index); revocation hides instantly; empty ACL hides from everyone; generation and overlay survive reopen |
+| `group_by_parent_caps_hits_per_parent_and_explains_them` | Native diversity cap + `explain` | At most `max_per_parent` hits per `parent_id`, unparented docs never capped, `explain` reports coverage/BM25/final score and the diversity counter; `max_per_parent = 0` is `InvalidQuery` |
+| `manifest_version_mismatch_fails_fast_on_reopen` | Open-time contract | Bumped `analyzer_version`/`schema_version`/`lexicon_version` → `VersionMismatch` with the offending field; changed `promoted_fields` → `SchemaMismatch`; the exact config reopens and still serves committed docs |
+| `sync_applies_incremental_batches_and_rebuilds_after_compaction` | Full Phase 0 sync on the real index | First sync rebuilds; incremental applies upsert + delete + ACL-only; replaying an identical record is skipped by envelope hash; `UpToDate` when caught up; journal compaction → `CursorExpired` rebuild; degraded index refuses reads and heals on rebuild; watermark/overlay/documents survive reopen; `integrity_check` clean at every step |
+| `sync_rebuilds_after_a_restored_backup` | `synced_seq > last_seq` divergence | Restoring a backup forces a snapshot rebuild; documents added after the backup disappear |
+| `source_lineage_is_reported_from_the_watermark` | Watermark accessor | `None` before the first sync, epoch + sequence after |
+
+**Key Invariants Verified:**
+- ACL decisions never come from a Tantivy segment; an ACL-only change costs no re-index
+- Reads fail closed on empty principals and on a degraded watermark
+- A version bump can never serve differently-analysed results silently
+- German compound recall is symmetric and independent of the write path
+- Sync never diverges: epoch change, restored backup, expired cursor and feed gaps all rebuild
+
+**Storage contract exercised by the suite:** only the hit envelope is stored (`id`,
+`parent_id`, `chunk_index`, `kind`, `title`, `path`, `name`, `folder`, `ext`,
+`mime`, `status`, timestamps, non-empty metadata, opt-in `excerpt`).
+`body`, `headings`, `body_parts`, `categories` and `tags` are indexed but not
+stored, and `id`/`parent_id` are fast fields — Phase B enforces ACL and the
+per-parent cap without reading a stored document. The unit tests in
+`src/v2/analyzer.rs` pin the canonical single-token analyzer
+(`text_tokens_emit_one_canonical_token_per_word`), and the ACL overlay unit
+tests pin the interned group-set encoding round trip.
+
+---
+
+## Phase 2 (General Indexer): HTTP Surface (`tests/phase2_v2_server_tests.rs`)
+
+`nvdb serve` (`src/v2/server.rs`) is the resident localhost front end of the v2
+engine — hand-rolled HTTP/1.1 on `std::net` (no new crate), one thread per
+connection behind a cap, JSON in and out. The suite binds the server to
+`127.0.0.1:0`, talks to it over a real TCP socket, and asserts on the raw status
+line and JSON body, so the route table, the error codes and the fail-closed ACL
+path are tested exactly as a client sees them.
+
+| Test | Purpose | Success Criteria |
+|------|---------|------------------|
+| `health_reports_engine_and_rejects_path_traversal` | `/health`, collection create, name validation | `{"ok":true,"engine":"nvdb-v2","collections":[]}` before any create; `POST /v2/collections {"name":"docs"}` opens the collection and writes `v2_manifest.json`; `../evil` is `400 invalid_collection_name` and creates nothing outside the root |
+| `foreign_directory_is_refused_instead_of_hijacked` | Startup-adjacent safety | A pre-existing non-empty directory that is not a v2 collection answers `403 foreign_directory` and its files are untouched |
+| `upsert_commit_search_acl_and_delete_round_trip` | Whole write/read surface | `commit:false` upserts are invisible until `POST .../commit` reports `doc_count`; a query without principals is `400 missing_principals`; a valid query returns hits with a numeric `took_ms`; `POST .../acl` bumps `acl_generation` and the revoked group sees zero hits on the very next search while the new group sees the doc; delete reports `deleted:1`, empties the search, and `/v2/collections` reports the remaining `doc_count`; unknown collection and unknown route are `404` with their own `code` |
+| `restart_rediscovers_the_collection_and_its_documents` | Persistence across processes | After a shutdown, a second server on the same root lists the collection in `/health` and `/v2/collections` and finds the committed document by search — proving the index writer was released |
+| `malformed_bodies_are_rejected_with_400` | Fail-loud input handling | An absent body is `400 empty_body`; a misspelled key (`nam`, `principal`) is `400 invalid_body` instead of being silently ignored |
+| `degraded_index_refuses_search_with_503` | Degraded boot-heal watermark | A collection marked degraded at open lists its `watermark.degraded = true` and search answers `503 index_degraded` instead of a partial result |
+
+**Key Invariants Verified:**
+- A search without principals can never widen to "match everything" over HTTP either
+- The ACL-only route is the fast path: visibility flips with no re-index, and the new generation is reported
+- A collection name can never escape the root directory, and a foreign directory is never taken over
+- Shutdown releases the index, so restarting on the same directory works
+
+**Unit tests (`src/v2/server.rs`):**
+
+| Test | Purpose |
+|------|---------|
+| `collection_names_reject_traversal_and_separators` | `../evil`, `a/b`, `a\b`, `.`, `..`, empty, spaces and non-ASCII are rejected; `docs`, `docs-v2`, `a.b_c-1`, `0` are accepted |
+| `engine_errors_map_to_explicit_statuses` | `MissingPrincipals` → `400`, `IndexDegraded` → `503`, `SchemaMismatch` → `409` |
+
+---
+
+## Phase 3 (General Indexer): Hybrid Search, Vectors & Level-2 (`tests/phase3_v2_hybrid_tests.rs`)
+
+Phase 3 adds the dense lane (`src/v2/vectors.rs`), scale-free fusion
+(`V2Index::hybrid_search`) and authoritative refinement (`src/v2/level2.rs`).
+The suite uses 4-dimensional embeddings so the arithmetic is inspectable, and a
+`MutableSource` whose ACLs change *after* the index synced — the only way to
+prove Level 2 does not trust derived state.
+
+| Test | Purpose | Success Criteria |
+|------|---------|------------------|
+| `content_hash_vectors_dedup_reuse_and_survive_reopen` | Content-keyed embeddings | A live document without a vector is pending (hex `content_hash`, stored `title`); attach clears it and writes generation 1; a second document with identical text is auto-linked and shares **one** `vectors.bin` entry; ACL-only and metadata-only upserts keep the link and do **not** rewrite the map; a text edit drops the link and re-lists the document as pending; after reopen both links and both embeddings survive and nothing is pending; deleting one twin keeps the shared embedding, and `gc_vectors()` drops exactly the now-unreferenced one |
+| `pending_embeddings_are_derived_and_attach_is_atomic` | Derived pending list + CAS attach | Pending order is by id and `limit` is respected (`limit = 0` → empty); a malformed hash is `InvalidQuery`; a completion carrying another document's hash is `StaleVectorCas` and **nothing** in the batch lands (pending count and generation stay at their pre-batch values, store still empty); wrong dimension → `WrongDimension`; wrong model and NaN → `InvalidQuery`; a deleted document → `StaleVectorCas`; a fully valid batch attaches 2 and empties the pending list |
+| `vector_and_hybrid_lanes_never_leak_past_acl_or_filters` | Dense-lane authority | Three documents with identical vectors but different ACL/folder/ext: a vector-only search for `public` never returns the `hr-secret` document (0 leaks) and its hits carry no lexical evidence; `hr-secret` sees only its own document; `folder("hr")` intersects the visible set; `ext("pdf")` yields nothing because the only pdf is invisible; the fused path and a filter-only scan return the same single visible document |
+| `hybrid_rrf_lifts_paraphrases_and_caps_parents_once` | RRF fusion + single diversity cap | The lexical lane alone ranks the exact-title document first and never returns the term-free paraphrase; hybrid returns both with the exact match still rank 1 (lexical rank 1, RRF numerator evidence present); the paraphrase carries `vector_rank = 1`, no lexical rank and `hit.score == rrf_score`; a zero-similarity document never outranks it; `weights(0, 1)` puts the paraphrase first; `group_by_parent(1)` over three chunks of one parent plus a second parent returns one hit for that parent and keeps the other parent, applied once on the fused list; empty principals → `MissingPrincipals`, both lanes off → `InvalidQuery`, `dense` without a vector → `InvalidQuery`, wrong dimension → `WrongDimension` |
+| `level2_rechecks_source_acl_reranks_and_respects_the_floor` | Authoritative re-check, reranking, floor | A document revoked in the source after the last sync is dropped although Level 1 returned it — its text appears neither in `hydrated_text` nor in the reranker's recorded input, and only the survivors are scored (1 document, not 2); `best_rerank_score` is the maximum; a reranker that prefers the lower-ranked survivor reorders it at `rerank_weight = 5.0`; a nonsense query with floor `0.02` sets `rejected = true` while keeping the hits, a real match does not; `shortlist = 1` keeps one hit; no reranker → `best_rerank_score = None` and `rejected = false`; empty principals → `MissingPrincipals`; a reranker returning the wrong number of scores → `V2Error::Rerank` |
+| `http_round_trip_pending_attach_and_hybrid_search` | `nvdb serve` end to end | `POST /v2/collections` with a vector lane, `upsert`, then `GET .../pending_embeddings?limit=10` reports both documents with hex hashes and titles; `POST .../attach_vectors` reports `attached: 2` and a bumped `vec_generation`; the pending list empties; a stale attach is `409 stale_vector_cas`; `POST .../hybrid_search` returns the exact match first and the paraphrase with `vector_rank = 1` and a numeric `took_ms`; a bodyless query is `400 missing_principals`; `limit=0` is `400 invalid_limit`; a lane-less collection reports `count: 0` and answers dense search with `400 vector_lane_not_configured` |
+
+**Key Invariants Verified:**
+- An embedding is keyed by content + model, so identical text costs one embedding
+  and ACL/metadata-only writes cost none
+- Pending embeddings are derived (`live ∧ ¬has_vector`), never a second queue
+- A vector batch is all-or-nothing: one stale completion attaches nothing
+- The dense lane is exactly as authoritative as the lexical lane (ACL overlay +
+  the same columnar filters), so a hybrid query cannot widen visibility
+- Diversity is applied once, after fusion — no lane can hide the other's winners
+- Level 2 never serves, and never reranks, text the source no longer authorises
+- The relevance floor turns a nonsense query into `rejected = true` instead of noise
+
+**Unit tests (`src/v2/vectors.rs`):**
+
+| Test | Purpose |
+|------|---------|
+| `store_round_trips_and_deduplicates_by_content_and_model` | Same key overwrites (dedup); a new model version is a new entry; the binary form round trips |
+| `store_rejects_truncated_and_non_finite_input` | Truncated bytes and a stored NaN fail at parse time, not at query time |
+| `gc_drops_every_unreferenced_embedding` | `retain_referenced` drops exactly the unreferenced keys |
+| `vec_map_bumps_generation_only_on_real_change` | A repeated link is a no-op; a change bumps once; generations round trip |
+| `vec_map_missing_generation_zero_is_empty_but_later_generations_are_corrupt` | Generation 0 without a file is normal, a missing generation above 0 is corruption |
+| `hex_digest_round_trips` | Hex form is 64 chars, case-insensitive on input, rejects malformed input |
 
 ---
 
@@ -496,13 +646,17 @@ cargo bench
 | Phase | Unit Tests | Integration | Property | Benchmarks | Total |
 |-------|------------|-------------|----------|------------|-------|
 | Core | 103 | - | - | - | 103 |
+| Phase 0 (sync contract) | 5 | 7 | - | - | 12 |
+| Phase 2 (v2 lexical engine) | 19 | 11 | - | - | 30 |
+| Phase 2 (v2 HTTP surface) | 2 | 6 | - | - | 8 |
+| Phase 3 (v2 hybrid + vectors) | 6 | 6 | - | - | 12 |
 | Phase 1A | - | 16 | - | - | 16 |
 | Phase 2 | - | 11 | - | - | 11 |
 | Phase 3 | - | 7 | - | - | 7 |
 | Phase 4 | - | 13 | - | - | 13 |
 | Phase 5 | - | 12 | - | - | 12 |
 | Phase 6 | - | - | 20 | 3 suites | 20+ |
-| **Total** | **103** | **59** | **20** | **3** | **185+** |
+| **Total** | **111** | **71** | **20** | **3** | **205+** |
 
 ---
 
@@ -516,6 +670,11 @@ cargo bench
 | 2026-02-14 | Updated for Phase 4: Filter DSL tests, 140 total tests |
 | 2026-02-14 | Updated for Phase 5: Compaction tests, 157 total tests |
 | 2026-02-14 | Updated for Phase 6: Property tests, benchmarks, 185+ total tests |
+| 2026-11-21 | Added Phase 0 sync/snapshot/ACL/revision contract suite (`src/sync.rs`, 7 tests + 5 unit tests) |
+| 2026-11-21 | Added Phase 2 v2 lexical engine (`src/v2/`, Tantivy 0.22): 11 integration tests + 19 unit tests (lexicon, analyzers, ACL overlay, schema) |
+| 2026-11-21 | Phase 2 exit-gate fixes: `body`/`headings`/`body_parts` no longer stored, `id`/`parent_id` FAST, Phase B reads no stored document before a candidate wins, `nvdb_text` emits one canonical token per word (`schema_version` 2, `analyzer_version` 2), `body_parts` weight 0.35, ACL overlay/fingerprints in compact binary |
+| 2026-11-21 | Added `nvdb serve` (`src/v2/server.rs`): 6 HTTP integration tests over real TCP + 2 unit tests (name validation, error→status mapping) |
+| 2026-11-21 | Added Phase 3 (`src/v2/vectors.rs`, `src/v2/level2.rs`, `V2Index::hybrid_search`): `content_hash`-keyed vectors + generation-stamped `vec_map`, derived pending list with atomic CAS attach, unified RRF hybrid search with a single diversity cap, Level-2 source-ACL re-check + reranker + relevance floor, and three new `nvdb serve` routes — 6 integration tests (`tests/phase3_v2_hybrid_tests.rs`) + 6 unit tests (`src/v2/vectors.rs`). Measured: `cargo test --lib` 150 passed, `phase3_v2_hybrid_tests` 6 passed |
 
 ---
 

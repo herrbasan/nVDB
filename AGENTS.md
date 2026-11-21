@@ -30,6 +30,7 @@ nVDB is a high-performance, embedded, in-memory vector database designed for LLM
 │   ├── error.rs            # Error types and Result alias
 │   ├── distance.rs         # SIMD distance functions (dot, cosine, euclidean)
 │   ├── search.rs           # Search API and exact search implementation
+│   ├── sync.rs             # Phase 0 sync/snapshot/ACL/revision contract
 │   ├── filter.rs           # Mongo-like Filter DSL
 │   ├── hnsw.rs             # HNSW index for approximate search
 │   ├── segment.rs          # Memory-mapped segment files
@@ -38,8 +39,24 @@ nVDB is a high-performance, embedded, in-memory vector database designed for LLM
 │   ├── manifest.rs         # Collection manifest (segments, WAL seq)
 │   ├── compaction.rs       # Segment compaction and index rebuild
 │   ├── lock.rs             # Multi-process locking (flock)
-│   └── id.rs               # Internal/external ID mapping
+│   ├── id.rs               # Internal/external ID mapping
+│   ├── bin/nvdb.rs         # CLI (init/search/… and `serve` for the v2 HTTP front end)
+│   └── v2/                 # Phase 2/3: Tantivy lexical + hybrid retrieval (additive)
+│       ├── mod.rs          # Public surface + V2Error
+│       ├── schema.rs       # V2CollectionConfig, VectorLaneConfig, V2Document, hashes
+│       ├── query.rs        # V2Query, V2HybridQuery, filters, hits, explains
+│       ├── analyzer.rs     # nvdb_exact / nvdb_identifier / nvdb_text, body parts
+│       ├── german_lexicon.rs  # Frozen German morpheme lexicon + splitter
+│       ├── acl_overlay.rs  # Generation-stamped ACL sidecar
+│       ├── vectors.rs      # vectors.bin + vec_map.gen_<N>.bin, pending list
+│       ├── level2.rs       # Level-2: source ACL re-check, reranker, floor
+│       ├── engine.rs       # V2Index: manifest, Phase A + B, hybrid, sync
+│       └── server.rs       # `nvdb serve`: std-only HTTP/1.1 front end
 ├── tests/                  # Integration tests by phase
+│   ├── phase0_sync_contract_tests.rs
+│   ├── phase2_v2_engine_tests.rs
+│   ├── phase2_v2_server_tests.rs
+│   ├── phase3_v2_hybrid_tests.rs
 │   ├── phase1a_segment_tests.rs
 │   ├── phase1a_locking_tests.rs
 │   ├── phase2_search_tests.rs
@@ -75,7 +92,11 @@ blake3 = "1.5"           # Cryptographic hashing
 byteorder = "1.5"        # Byte order handling
 bincode = "1.3"          # Binary serialization
 fastrand = "2.0"         # Fast random number generation
+tantivy = "0.22"         # Phase 2 lexical engine (MIT, pure Rust)
 ```
+
+Phase 3 adds **no** crate: the vector lane reuses `crate::distance` (SIMD),
+`crate::rerank::Reranker`, `crate::sync`, `blake3`, `parking_lot` and `serde`.
 
 ---
 
@@ -97,13 +118,17 @@ cargo doc --open
 ### Testing
 
 ```bash
-# Run all tests (185+ tests)
+# Run all tests (lib + every integration suite)
 cargo test
 
 # Run specific test suite
+cargo test --test phase0_sync_contract_tests
+cargo test --test phase2_v2_engine_tests
 cargo test --test phase1a_segment_tests
 cargo test --test phase1a_locking_tests
 cargo test --test phase2_search_tests
+cargo test --test phase2_v2_server_tests
+cargo test --test phase3_v2_hybrid_tests
 cargo test --test phase3_hnsw_tests
 cargo test --test phase4_filter_tests
 cargo test --test phase5_compaction_tests
@@ -378,6 +403,134 @@ unsafe {
 - Single writer per collection (enforced by `flock`)
 - Readers never block (immutable segments)
 - Writers don't block readers (copy memtable, swap Arc)
+
+### Sync & Indexing Contract (`src/sync.rs`, Phase 0)
+
+nVDB is a *derived* index: never the source of truth, always rebuildable.
+
+- **Lineage:** sources expose `(source_epoch_uuid, last_seq, min_available_seq)`; the index commits the highest *contiguous* `synced_seq`.
+- **Divergence:** a changed epoch, `synced_seq > last_seq` (restored backup), or `CursorExpired` refuses incremental catch-up and forces a clean snapshot rebuild — never silent divergence.
+- **Dual-write failure:** a failed apply sets `degraded = true` in the persisted watermark; reads fail with `IndexDegraded` until a rebuild heals.
+- **Two hashes:** `content_hash` = searchable text only (gates embedding reuse); `envelope_hash` = canonical full envelope incl. sorted ACL + canonical JSON metadata (gates no-op skip, so ACL/metadata-only updates are never dropped).
+- **Fail-closed reads:** empty principals → `MissingPrincipals`; any catch-up lag → `BootHealIncomplete`; Level-2 hydration re-checks ACL against the authoritative source → `AclDenied`.
+- **Vectors:** pending = `live ∧ ¬has_vector` (no separate queue); `attach_vectors` is compare-and-set on `(id, content_hash, model_version)`; stale completions fail loudly with `StaleVectorCas`.
+
+### Lexical Retrieval Engine (`src/v2/`, Phase 2)
+
+Phase 1's kill-switch verdict: **embed Tantivy (MIT, pure Rust)** behind our own API rather than writing an inverted index. `src/v2/` is additive — v1 (`Collection`, `src/lexical.rs`) is untouched.
+
+**Files on disk (one collection directory):**
+
+| Artifact | Written | Meaning |
+|----------|---------|---------|
+| `meta.json`, `*.term`, `*.idx`, `*.store` | Tantivy | immutable segments; only the hit envelope is stored (`body`, `headings`, `body_parts` are indexed but **not** stored) |
+| `v2_manifest.json` | atomic rename | `config`, `acl_generation`, `watermark`, `doc_count` |
+| `acl_overlay.gen_<N>.bin` | tmp + `sync_all` + rename | authoritative ACL map per generation; compact binary, group sets interned (`doc_id -> set index`) |
+| `v2_fingerprints.bin` | atomic rename | per-document `content_hash` / `envelope_hash` / `no_acl_hash` as raw 32-byte BLAKE3 digests |
+| `vectors.bin` | tmp + `sync_all` + rename | content-addressed embeddings, key `(content_hash, model_version)` — identical text is embedded once |
+| `vec_map.gen_<N>.bin` | tmp + `sync_all` + rename | `doc_id -> content_hash` links per generation; the manifest names the live one (`vec_generation`) and superseded generations are deleted after the swap |
+
+Both sidecars are length-prefixed binary, not JSON: `open()` is a read path, and parsing megabytes of JSON (26k entries) cost ~20 ms for nothing. An `IndexWriter` is created on the **first write**, never on open.
+
+**Open-time contract:** `schema_version`, `analyzer_version` and `lexicon_version` must match the manifest, and `promoted_fields` must be identical — otherwise `V2Error::VersionMismatch` / `SchemaMismatch`. A differing analyzer is never silently tolerated. (`schema_version` 2 = unstored `body`, fast `id`/`parent_id`, binary sidecars; `analyzer_version` 2 = one canonical token per word.)
+
+**Analyzers** (registered on every open): `nvdb_exact` (trim + lowercase, whole string), `nvdb_identifier` (whole token + sub-tokens on `/ \ . - _ :`), `nvdb_text` (Unicode word segmentation + lowercase, then `ä->ae, ö->oe, ü->ue, ß->ss` folded into **one** canonical token per word, so `Förderprogramm` and `Foerderprogramm` are the same term and BM25 length norms stay exact).
+
+**Stored vs indexed fields:** `id`, `parent_id` (both `STRING | STORED | FAST`), `chunk_index`, `kind`, `title`, `path`, `name`, `folder`, `ext`, `mime`, `status`, `created_at`, `updated_at`, non-empty `metadata`, and the opt-in `excerpt` (≤ 1 KB) are stored. `title_exact`, `headings`, `categories`, `tags`, `body`, `body_parts` are indexed only — `nVDB` is a derived indexer, full content lives in `nDB`.
+
+**German compounds:** `decompose_german_compound` is a deterministic fewest-parts DP over a frozen, versioned lexicon (500+ morphemes, umlauts folded, Fugenlaute `s/es/n/en/er`, parts ≥ 4 chars). Index time writes `body_parts` (lexicon prefixes of every word + nested decomposition); query time searches the *same* term set against `body_parts` only, at `FieldWeights::body_parts = 0.35` — strictly below `body` (1.0) and `title` (4.0), so a document holding the exact compound always outranks one holding only its parts. Both directions therefore work: compound query → component document, component query → compound document. `GERMAN_LEXICON_VERSION` gates the index.
+
+**Two-phase search:**
+- *Phase A* — one weighted `BooleanQuery` over `title_exact`, `title`, `path`, `name`, `headings`, `categories`, `tags`, `body`, `body_parts` (`FieldWeights`), with `Occur::Must` columnar filters (`folder`, `ext`, `kind`, `status`, `mime`, `created_at`/`updated_at` ranges, typed promoted columns), a postings-only `PhraseQuery` boost on `title`/`body` for queries of 2..=6 terms (`×1.5`), and, when `fuzzy_edits > 0`, a distance-1 `FuzzyTermQuery` (transposition cost 1) at `×0.25` per non-numeric term ≥ 4 chars on `title` and `body`, capped at the first 6 terms. Fetch `max(top_k * 20, 200)`, widening ×5 up to 4 rounds. Zero document-store reads.
+- *Phase B* — walk the Phase A order and read **only** `id`/`parent_id` from fast fields to enforce the authoritative ACL overlay (fail-closed) and the native `group_by_parent` cap; stop as soon as `top_k` winners exist; hydrate the stored envelope for those winners alone. `explain` (coverage, matched terms, phrase flag, counters) is computed only when `query.explain == true`, from the stored `title`/`path`.
+
+**ACL:** never read from segments. `update_acl_only` bumps the overlay generation and rewrites overlay + manifest atomically — no re-index, immediately visible. An absent document, an empty group list, or empty principals is not visible.
+
+**Sync:** `sync_from` implements the full Phase 0 contract — epoch/cursor-ahead divergence and `CursorExpired` force `rebuild_from_snapshot`; an unchanged `envelope_hash` is skipped; an unchanged `content_hash` with an unchanged no-ACL hash is applied through `update_acl_only`; the watermark commits atomically. `integrity_check` compares live hashes against the source snapshot and verifies reader/overlay alignment.
+
+**Diversity/typo rule of thumb:** `fuzzy_edits` is opt-in; exact field weights keep a correct title ahead of a fuzzy match, so recall is added without reordering what the user typed correctly.
+
+**HTTP front end (`src/v2/server.rs`, `nvdb serve`):** hand-rolled HTTP/1.1 on `std::net` — no new crate, same shape as `nDB`'s daemon (thread per connection behind a cap, keep-alive, 30 s I/O timeouts, 64 MB body cap). `V2Server` owns `root_dir: PathBuf` and `collections: RwLock<HashMap<String, Arc<RwLock<V2Index>>>>`; startup adopts every direct subdirectory holding a `v2_manifest.json` and **fails loud** if one will not open.
+
+```
+GET  /health                            -> {"ok":true,"engine":"nvdb-v2","collections":[...]}
+GET  /v2/collections                    -> {"collections":[{name,doc_count,acl_generation,watermark}]}
+POST /v2/collections                    <- {"name","config"?}
+POST /v2/collections/{name}/upsert      <- {"docs":[V2Document],"commit"?=true} -> {"upserted":N}
+POST /v2/collections/{name}/delete      <- {"ids":[...],"commit"?=true}         -> {"deleted":N}
+POST /v2/collections/{name}/acl         <- {"id","acl":[...],"commit"?=true}    -> {"ok":true,"acl_generation":N}
+POST /v2/collections/{name}/commit      -> {"ok":true,"doc_count":N}
+POST /v2/collections/{name}/search      <- V2Query JSON -> {"hits":[V2SearchHit],"took_ms":f64}
+POST /v2/collections/{name}/hybrid_search <- V2HybridQuery JSON -> {"hits":[V2HybridHit],"took_ms":f64}
+GET  /v2/collections/{name}/pending_embeddings?limit=100 -> {"count":N,"pending":[PendingEmbedding]}
+POST /v2/collections/{name}/attach_vectors <- {"attachments":[VectorAttachment]} -> {"attached":N,"vec_generation":N}
+```
+
+Errors are `{"error": "...", "code": "..."}` with an explicit status: `400` malformed body / invalid name (traversal included) / `MissingPrincipals` / `WrongDimension` / `vector_lane_not_configured`, `403` a non-v2 directory the server refuses to take over, `404` unknown route or collection, `409` config/version conflict or a stale vector attachment (`stale_vector_cas`), `500` IO or corruption, `503` `IndexDegraded` (the degraded boot-heal watermark). Collection names are `[a-zA-Z0-9._-]+` and `.`/`..` are rejected, so a name can never escape `root_dir`. `V2Query` is the wire type (`Deserialize` with `deny_unknown_fields`); `V2SearchHit`/`V2Explain` are `Serialize`.
+
+`start_in_background(root, addr)` (with `127.0.0.1:0`) returns a handle carrying the bound `SocketAddr`; `shutdown()` stops the accept loop, waits for in-flight requests and drops every index so the Tantivy writer lock is released and a restart on the same directory works. `serve_blocking` is the CLI path: `nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510]`.
+
+### Vector Lane & Unified Hybrid Search (`src/v2/vectors.rs`, `level2.rs`, Phase 3)
+
+**Opt-in and cheap.** `V2CollectionConfig::vector_lane: Option<VectorLaneConfig>` defaults to
+`None`; a lexical-only collection therefore writes no vector file, answers
+`next_pending_embeddings` with an empty list and rejects `attach_vectors` /
+dense search with `VectorLaneNotConfigured` instead of guessing. The lane is
+`{ dim, distance (default Cosine), model_version, flat_search_cutoff }` and is
+part of the open-time schema contract — a changed dimension or model version is a
+`SchemaMismatch`, never a silent reinterpretation of stored embeddings.
+
+**Keyed by content, never by id.** `vectors.bin` maps
+`(content_hash, model_version) -> Vec<f32>`, so two documents with identical
+searchable text share one embedding. `vec_map.gen_<N>.bin` holds the mutable
+`doc_id -> content_hash` links, generation-stamped like the ACL overlay:
+new generation file → `manifest.vec_generation` swap → cleanup of superseded
+generations. **Immutable segments are never touched by a vector attach.**
+
+| Event | Effect on the link |
+|---|---|
+| ACL-only or metadata-only upsert (same `content_hash`) | kept — zero re-embedding |
+| text edit onto unseen text | dropped → the doc reappears in `next_pending_embeddings` |
+| text edit onto text another document already embedded | re-linked (dedup hit), no embedding request |
+| `delete(id)` | dropped; the embedding stays until a rebuild GCs unreferenced hashes |
+
+**Pending is derived:** `next_pending_embeddings(limit)` = `live ∧ ¬has_vector`,
+ordered by id. There is no durable queue that could drift. `attach_vectors` is
+compare-and-set on `(id, content_hash, model_version)`: the **whole batch** is
+validated (dimension, finiteness, model, liveness, hash equality) before
+anything is written, so one stale completion rejects the batch with
+`StaleVectorCas` instead of half-applying it. Attach commits its own link
+generation atomically.
+
+**Fusion (Level 1).** `V2Index::hybrid_search(&V2HybridQuery)` runs the lexical
+lane with `top_k = candidate_k` and **no** per-lane diversity cap, and the dense
+lane over the `vec_map` with `crate::distance` (SIMD). The dense lane honours the
+same authority as the lexical one: with any columnar filter active it collects
+candidates through a filter-only posting walk (`DocSetCollector`) and intersects
+with the ACL overlay; otherwise it checks `acl_overlay.is_visible` while scanning
+the link map. Similarity is higher-is-better and consistent with
+`src/search.rs::compute_score` (cosine is already a similarity; Euclidean is
+`1/(1+d)`). `rrf = lw/(rrf_k + lex_rank) + vw/(rrf_k + vec_rank)` with 1-based
+ranks, `rrf_k = 60`, `candidate_k = 200`, both weights `1.0` by default.
+`group_by_parent` is applied **once** on the fused order, then `top_k` winners are
+hydrated — vector-only winners included. `dense` defaults to
+`query_vector.is_some()` in the wire form.
+
+**Refinement (Level 2).** `refine_level2(query_text, principals, hits, source,
+reranker, options)` takes the first `shortlist` (20) survivors. With a
+`SourceConnector` every survivor is re-read and its **authoritative** ACL
+re-checked; a document revoked or deleted since the last sync is dropped
+silently — announcing it would disclose that it exists — and its text never
+reaches the reranker. Reranker text is `envelope.indexable_text` when a source is
+present, otherwise `excerpt` or `title + " " + path`. A `Reranker` result is
+verified (one finite score per document, else `V2Error::Rerank`) and fused with
+the Level-1 order by weighted RRF (`1.0` vs `rerank_weight`, default `0.2`).
+`best_rerank_score < relevance_floor` (default `0.02`) sets `rejected = true`
+while keeping the hits as low-relevance evidence.
+
+**No ANN lane yet.** `flat_search_cutoff` records the intended policy; v2 always
+scans the content-hash map flat, which the field's documentation states instead
+of implying an index that does not exist.
 
 ---
 
