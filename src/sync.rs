@@ -322,7 +322,9 @@ impl SyncWatermark {
         Ok(watermark)
     }
 
-    fn validate(&self) -> Result<(), SyncError> {
+    /// Check the watermark invariants: a lineage epoch must be present, and
+    /// `degraded` and `degraded_reason` must agree.
+    pub fn validate(&self) -> Result<(), SyncError> {
         if self.source_epoch_uuid.is_empty() {
             return Err(invalid_data("watermark has an empty source_epoch_uuid"));
         }
