@@ -142,8 +142,18 @@ const ALL_TERMS_BOOST: f32 = 4.0;
 /// Shortest query (in distinct terms) that gets a phrase or all-terms conjunction clause.
 const PHRASE_MIN_TERMS: usize = 2;
 
-/// Longest query (in distinct terms) that gets a phrase or all-terms conjunction clause.
-const PHRASE_MAX_TERMS: usize = 8;
+/// Longest query (in tokens/distinct terms) that gets a phrase or all-terms conjunction clause.
+/// Raised from 8 to 32 (herrbasan/nVDB#5): longer verbatim phrases (e.g. 12-word quotes)
+/// silently lost both PhraseQuery and ALL_TERMS_BOOST at 8; postings-only PhraseQuery
+/// short-circuits faster as term count grows.
+const PHRASE_MAX_TERMS: usize = 32;
+
+/// Minimum BM25 ratio over the 5th distinct-parent lexical hit for a candidate to count
+/// as an exact lexical outlier (PhraseQuery / title_exact / all-terms spike) in hybrid RRF
+/// when `lexical_weight < vector_weight` (herrbasan/nVDB#5). Flat topical queries sit around
+/// 1.1x-1.4x; verbatim phrase/title hits land at 6x-45x.
+const LEXICAL_SPIKE_RATIO: f32 = 2.5;
+const LEXICAL_SPIKE_BASELINE_PARENTS: usize = 5;
 
 /// Names that cannot be promoted, because the engine already uses them.
 const RESERVED_FIELD_NAMES: &[&str] = &[
@@ -426,6 +436,19 @@ impl StoredEnvelope {
             explain: None,
         }
     }
+}
+
+/// BM25 score of the `LEXICAL_SPIKE_BASELINE_PARENTS`-th distinct parent in the
+/// lexical lane, used to detect exact phrase/title outliers in hybrid RRF.
+fn lexical_spike_baseline(lexical_hits: &[V2SearchHit]) -> Option<f32> {
+    let mut seen_parents: HashSet<&str> = HashSet::with_capacity(LEXICAL_SPIKE_BASELINE_PARENTS);
+    for hit in lexical_hits {
+        let key = hit.parent_id.as_deref().unwrap_or(hit.id.as_str());
+        if seen_parents.insert(key) && seen_parents.len() == LEXICAL_SPIKE_BASELINE_PARENTS {
+            return (hit.score > 0.0 && hit.score.is_finite()).then_some(hit.score);
+        }
+    }
+    None
 }
 
 /// Convert a distance metric into a higher-is-better similarity.
@@ -1202,6 +1225,16 @@ impl V2Index {
 
         let mut fused: HashMap<String, FusedHit> = HashMap::new();
         let damping = query.rrf_k as f32;
+        let spike_threshold = if query.dense
+            && query.lexical_enabled
+            && query.lexical_weight > 0.0
+            && query.vector_weight > query.lexical_weight
+        {
+            lexical_spike_baseline(&lexical_hits).map(|base| base * LEXICAL_SPIKE_RATIO)
+        } else {
+            None
+        };
+        let spike_weight = query.lexical_weight.max(query.vector_weight * 1.1);
         let mut lexical_by_id: HashMap<&str, &V2SearchHit> = HashMap::new();
         for (index, hit) in lexical_hits.iter().enumerate() {
             let rank = index + 1;
@@ -1210,7 +1243,12 @@ impl V2Index {
             entry.lexical_score = Some(hit.score);
             entry.lexical_rank = Some(rank);
             entry.explain = hit.explain.clone();
-            entry.rrf += query.lexical_weight / (damping + rank as f32);
+            let weight = if spike_threshold.is_some_and(|t| hit.score >= t) {
+                spike_weight
+            } else {
+                query.lexical_weight
+            };
+            entry.rrf += weight / (damping + rank as f32);
         }
         for (index, (id, score)) in vector_hits.iter().enumerate() {
             let rank = index + 1;

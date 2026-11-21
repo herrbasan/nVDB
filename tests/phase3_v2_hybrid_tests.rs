@@ -963,6 +963,93 @@ fn level2_rechecks_source_acl_reranks_and_respects_the_floor() {
     ));
 }
 
+#[test]
+fn long_exact_phrase_and_hybrid_lexical_spike_survive_vector_heavy_rrf() {
+    // Regression for herrbasan/nVDB#5:
+    // 1. A 12-word exact phrase (> old PHRASE_MAX_TERMS=8) must keep PhraseQuery
+    //    and all-terms boosts and rank #1 lexically.
+    // 2. Under semantic-weighted hybrid RRF (w_L=0.3, w_V=1.0, rrf_k=20), a
+    //    >= 2.5x BM25 exact-phrase outlier must not be buried behind 25 dense-only
+    //    neighbors, while a flat topical query keeps dense in the lead.
+    let dir = TempDir::new().expect("temp dir");
+    let mut index = open(dir.path());
+
+    let phrase = "being aware of ones own thinking and relation to other thinking things";
+    let mut target = doc(
+        "target",
+        "DeepSeek Overview",
+        &format!("I am convinced consciousness means {phrase} in practice."),
+        &["public"],
+    );
+    target.parent_id = Some("target-sess".to_string());
+    index.upsert(target).expect("upsert target");
+
+    // 25 competing documents: dense vectors point straight at the query axis,
+    // and their bodies repeat common terms from the phrase without matching it verbatim.
+    for i in 0..25 {
+        let mut distractor = doc(
+            &format!("dist-{i}"),
+            &format!("Other thinking things {i}"),
+            &format!(
+                "thinking thinking other things and other things to relation of thinking aware {i}"
+            ),
+            &["public"],
+        );
+        distractor.parent_id = Some(format!("dist-sess-{i}"));
+        index.upsert(distractor).expect("upsert distractor");
+    }
+    index.commit().expect("commit");
+
+    // Target sits orthogonal to the query vector (misses dense top-20); distractors align with it.
+    attach(&mut index, "target", vec![0.0, 1.0, 0.0, 0.0]);
+    for i in 0..25 {
+        let eps = (i as f32) * 0.001;
+        attach(&mut index, &format!("dist-{i}"), vec![1.0 - eps, eps, 0.0, 0.0]);
+    }
+    index.commit().expect("commit");
+
+    // 1. Lexical 12-word exact phrase ranks #1.
+    let lex_hits = index
+        .search(&hybrid_query(phrase, &["public"], 10))
+        .expect("lexical search");
+    assert_eq!(
+        lex_hits.first().map(|h| h.id.as_str()),
+        Some("target"),
+        "12-word exact phrase must rank #1 lexically: {:?}",
+        lex_hits.iter().take(5).map(|h| (&h.id, h.score)).collect::<Vec<_>>()
+    );
+
+    // 2. Hybrid with semantic weights (w_L=0.3, w_V=1.0, rrf_k=20) promotes the
+    //    exact-phrase lexical spike to #1 instead of dropping it behind vec#1..vec#25.
+    let hyb = V2HybridQuery::new(hybrid_query(phrase, &["public"], 10))
+        .vector(vec![1.0, 0.0, 0.0, 0.0])
+        .candidate_k(200)
+        .rrf_k(20)
+        .weights(0.3, 1.0);
+    let hyb_hits = index.hybrid_search(&hyb).expect("hybrid search");
+    assert_eq!(
+        hyb_hits.first().map(|h| h.hit.id.as_str()),
+        Some("target"),
+        "exact-phrase lexical spike must survive semantic-weighted hybrid RRF: {:?}",
+        hyb_hits.iter().take(5).map(|h| (&h.hit.id, h.rrf_score, h.lexical_rank, h.vector_rank)).collect::<Vec<_>>()
+    );
+
+    // 3. Flat topical query (no >= 2.5x BM25 spike) still lets dense lead.
+    let topical = V2HybridQuery::new(hybrid_query("thinking things", &["public"], 10))
+        .vector(vec![1.0, 0.0, 0.0, 0.0])
+        .candidate_k(200)
+        .rrf_k(20)
+        .weights(0.3, 1.0);
+    let topical_hits = index.hybrid_search(&topical).expect("topical hybrid");
+    assert!(
+        topical_hits
+            .first()
+            .is_some_and(|h| h.hit.id.starts_with("dist-")),
+        "flat topical query must keep dense-aligned hits ahead: {:?}",
+        topical_hits.iter().take(3).map(|h| (&h.hit.id, h.rrf_score)).collect::<Vec<_>>()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. HTTP round trip
 // ---------------------------------------------------------------------------
