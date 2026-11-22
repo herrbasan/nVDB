@@ -139,6 +139,12 @@ const BODY_PHRASE_BOOST: f32 = 10.0;
 /// from drowning out full-coverage matches.
 const ALL_TERMS_BOOST: f32 = 4.0;
 
+/// Score multiplier of the exact `name`/`path` identifier clause for a single-token query.
+/// Applied only to the whole query token, never to its separator-split parts, so a query
+/// that *is* a filename stem (`md-blocks-spec`) outranks a document that merely mentions
+/// `md-blocks-spec.md` in its body (`herrbasan/nVDB#4`).
+const NAME_EXACT_BOOST: f32 = 6.0;
+
 /// Shortest query (in distinct terms) that gets a phrase or all-terms conjunction clause.
 const PHRASE_MIN_TERMS: usize = 2;
 
@@ -1982,6 +1988,21 @@ impl V2Index {
             ] {
                 if weight > 0.0 {
                     clauses.push((Occur::Should, boost(term_query(field, identifier), weight)));
+                }
+            }
+        }
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) {
+            let whole = &identifiers[0];
+            for (field, weight) in [
+                (self.fields.name, weights.name),
+                (self.fields.path, weights.path),
+            ] {
+                if weight > 0.0 {
+                    clauses.push((
+                        Occur::Should,
+                        boost(term_query(field, whole), weight * NAME_EXACT_BOOST),
+                    ));
                 }
             }
         }

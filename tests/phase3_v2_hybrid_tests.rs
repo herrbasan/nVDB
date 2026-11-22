@@ -1050,6 +1050,45 @@ fn long_exact_phrase_and_hybrid_lexical_spike_survive_vector_heavy_rrf() {
     );
 }
 
+#[test]
+fn query_that_is_a_filename_stem_ranks_the_file_above_a_body_mention() {
+    // Regression for herrbasan/nVDB#4: the query IS the filename stem, so the
+    // file must outrank a document that merely mentions `md-blocks-spec.md`.
+    let dir = TempDir::new().expect("temp dir");
+    let mut index = open(dir.path());
+
+    let mut spec = doc(
+        "spec",
+        "MD-Blocks Specification",
+        "Sections, blocks, columns and named data ride in invisible HTML comments.",
+        &["public"],
+    );
+    spec.name = "md-blocks-spec.md".to_string();
+    spec.path = "documentation/md-blocks/md-blocks-spec.md".to_string();
+    index.upsert(spec).expect("upsert spec");
+
+    let mut brief = doc(
+        "brief",
+        "Authoring brief",
+        "Keep the rules concise; see md-blocks-spec.md for the full rules and examples.",
+        &["public"],
+    );
+    brief.name = "BRIEF.md".to_string();
+    brief.path = "documentation/md-blocks/BRIEF.md".to_string();
+    index.upsert(brief).expect("upsert brief");
+    index.commit().expect("commit");
+
+    let hits = index
+        .search(&hybrid_query("md-blocks-spec", &["public"], 10))
+        .expect("lexical search");
+    assert_eq!(
+        hits.first().map(|h| h.id.as_str()),
+        Some("spec"),
+        "the file itself must outrank a body mention of its name: {:?}",
+        hits.iter().map(|h| (&h.id, h.score)).collect::<Vec<_>>()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. HTTP round trip
 // ---------------------------------------------------------------------------

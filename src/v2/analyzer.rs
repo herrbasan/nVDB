@@ -34,6 +34,10 @@ pub const TOKENIZER_TEXT: &str = "nvdb_text";
 /// Characters that separate sub-tokens inside a path or identifier.
 const IDENTIFIER_SEPARATORS: [char; 6] = ['/', '\\', '.', '-', '_', ':'];
 
+/// Longest trailing file extension treated as such (`md`, `json`, `xlsx`).
+/// A longer dotted suffix belongs to the stem, not the extension.
+const MAX_EXTENSION_CHARS: usize = 5;
+
 /// Hard cap on indexed `body_parts` tokens per document.
 ///
 /// Keeps a pathological body from exploding the index; truncation follows
@@ -165,9 +169,14 @@ fn identifier_token_spans(text: &str) -> Vec<(usize, usize, String)> {
         return Vec::new();
     }
     let base = text.len() - text.trim_start().len();
-    let mut tokens: Vec<(usize, usize, String)> = Vec::with_capacity(4);
+    let mut tokens: Vec<(usize, usize, String)> = Vec::with_capacity(5);
     let whole = trimmed.to_lowercase();
     tokens.push((base, base + trimmed.len(), whole.clone()));
+    if let Some(stem) = identifier_stem_span(trimmed, base) {
+        if tokens.iter().all(|(_, _, existing)| *existing != stem.2) {
+            tokens.push(stem);
+        }
+    }
 
     let mut run_start: Option<usize> = None;
     for (offset, character) in trimmed.char_indices() {
@@ -184,6 +193,36 @@ fn identifier_token_spans(text: &str) -> Vec<(usize, usize, String)> {
         push_identifier_run(&mut tokens, &whole, base, start, &trimmed[start..]);
     }
     tokens
+}
+
+/// Extension-stripped stem of the last path segment, if that segment ends in a
+/// short ASCII-alphanumeric extension.
+///
+/// A query that *is* the filename stem (`md-blocks-spec`) must match the file
+/// whose name carries the extension (`md-blocks-spec.md`) as a whole token, not
+/// only through its separator-split parts (`herrbasan/nVDB#4`).
+fn identifier_stem_span(trimmed: &str, base: usize) -> Option<(usize, usize, String)> {
+    let segment_start = trimmed.rfind(|character| character == '/' || character == '\\');
+    let segment_start = segment_start.map_or(0, |index| index + 1);
+    let segment = &trimmed[segment_start..];
+    let dot = segment.rfind('.')?;
+    if dot == 0 {
+        return None;
+    }
+    let extension = &segment[dot + 1..];
+    if extension.is_empty()
+        || extension.len() > MAX_EXTENSION_CHARS
+        || !extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some((
+        base + segment_start,
+        base + segment_start + dot,
+        segment[..dot].to_lowercase(),
+    ))
 }
 
 fn push_identifier_run(
@@ -371,12 +410,48 @@ mod tests {
             identifier_tokens("docs/Q1/quarterly-report.pdf"),
             vec![
                 "docs/q1/quarterly-report.pdf".to_string(),
+                "quarterly-report".to_string(),
                 "docs".to_string(),
                 "q1".to_string(),
                 "quarterly".to_string(),
                 "report".to_string(),
                 "pdf".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn identifier_tokens_emit_extension_stripped_stem() {
+        assert_eq!(
+            identifier_tokens("md-blocks-spec.md"),
+            vec![
+                "md-blocks-spec.md".to_string(),
+                "md-blocks-spec".to_string(),
+                "md".to_string(),
+                "blocks".to_string(),
+                "spec".to_string(),
+            ]
+        );
+        assert_eq!(
+            identifier_tokens("documentation/md-blocks/md-blocks-spec.md"),
+            vec![
+                "documentation/md-blocks/md-blocks-spec.md".to_string(),
+                "md-blocks-spec".to_string(),
+                "documentation".to_string(),
+                "md".to_string(),
+                "blocks".to_string(),
+                "spec".to_string(),
+            ]
+        );
+        assert_eq!(
+            identifier_tokens("md-blocks-spec"),
+            vec![
+                "md-blocks-spec".to_string(),
+                "md".to_string(),
+                "blocks".to_string(),
+                "spec".to_string(),
+            ],
+            "a value without a file extension emits no extra token"
         );
     }
 
