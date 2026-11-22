@@ -38,7 +38,6 @@ New to nVDB? Start here:
 |----------|-------------|
 | [Development Plan](archive/development-plan.md) | v1 development phases and roadmap |
 | [Phase handovers](archive/) | v1 completion notes |
-| [Integrations](./integrations/) | v1-era language guides (Node.js/N-API, WASM, gRPC) — none is a current production path |
 
 ## Common Tasks
 

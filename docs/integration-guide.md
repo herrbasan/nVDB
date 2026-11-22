@@ -1,5 +1,7 @@
 # nVDB Integration Guide
 
+> **Scope: the v1 embedded crate.** The patterns below target the v1 Rust library (`Database`/`Collection`). Production retrieval is the v2 engine served by `nvdb serve` over HTTP — see [v2-server.md](../documentation/v2-server.md). The language-binding sketches (Python, Go) are illustrative; this repository ships no Node.js, Python or Go bindings.
+>
 > **Version:** 0.1.0  
 > **Last Updated:** 2026-02-14
 
@@ -360,66 +362,6 @@ db = ndb_py.PyDatabase("./data")
 results = db.search("embeddings", [0.1] * 768, top_k=10)
 for r in results:
     print(f"{r.id}: {r.score}")
-```
-
-### Node.js (via N-API)
-
-```rust
-// Native module using napi-rs
-use napi_derive::napi;
-use nVDB::{Database, Search};
-
-#[napi]
-pub struct nVDB {
-    db: Database,
-}
-
-#[napi]
-impl nVDB {
-    #[napi(constructor)]
-    pub fn new(path: String) -> napi::Result<Self> {
-        Ok(Self {
-            db: Database::open(&path).map_err(|e| {
-                napi::Error::from_reason(e.to_string())
-            })?,
-        })
-    }
-    
-    #[napi]
-    pub fn search(
-        &self,
-        collection: String,
-        query: Vec<f32>,
-        top_k: u32,
-    ) -> napi::Result<Vec<Match>> {
-        let coll = self.db.get_collection(&collection)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        
-        let search = Search::new(&query).top_k(top_k as usize);
-        let results = coll.search(&search)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        
-        Ok(results.into_iter().map(|m| Match {
-            id: m.id,
-            score: m.score,
-        }).collect())
-    }
-}
-
-#[napi(object)]
-pub struct Match {
-    pub id: String,
-    pub score: f32,
-}
-```
-
-```javascript
-// usage.js
-const { nVDB } = require('./index.node');
-
-const db = new nVDB('./data');
-const results = db.search('embeddings', new Array(768).fill(0.1), 10);
-console.log(results);
 ```
 
 ### Go (via CGO)

@@ -88,7 +88,7 @@ Default deployment: `nvdb serve --dir <path> --host 127.0.0.1 --port 3510 --rera
 │   ├── bench_insert.rs
 │   └── bench_recovery.rs
 ├── documentation/          # Reference docs: v2-server.md (current) plus
-│                           # architecture/rust-api/filter-dsl/nodejs-api (v1-era)
+│                           # architecture/rust-api/filter-dsl (v1 crate, clearly scoped)
 ├── docs/                   # Working notes and history
 │   ├── README.md           # Docs index
 │   ├── user-guide.md       # v1 API guide
@@ -96,14 +96,11 @@ Default deployment: `nvdb serve --dir <path> --host 127.0.0.1 --port 3510 --rera
 │   ├── scope-and-boundaries.md
 │   ├── test-documentation.md
 │   ├── adr/                # v1 architecture decision records
-│   ├── integrations/       # v1-era language guides (napi, wasm, grpc)
 │   └── archive/            # historical plans and phase handovers
-├── napi/                   # LEGACY: napi-rs bindings for the v1 crate
-│   └── ...                 # not built, not tested, not a production path
 └── examples/               # v1 usage examples (web_service.rs is commented out)
 ```
 
-`napi/` remains a workspace member (`Cargo.toml` → `members = [".", "napi"]`) and still builds a `cdylib` on request, but it is frozen: it wraps the v1 API only, has no v2 surface, carries stale prebuilt `.node` binaries and is not used by any production consumer. Do not advertise it. If a task asks for Node bindings, treat that as a new project.
+There are no Node.js bindings. The `napi/` addon and its `cdylib` workspace member were removed on 2026-11-22; nVDB is consumed as a Rust crate or through the `nvdb serve` HTTP API. If a task asks for Node bindings, treat that as a new project.
 
 ### Core Dependencies
 
@@ -730,7 +727,7 @@ Historical working notes live in `docs/archive/`; leave them unless they are act
 - Schema migrations within a collection (fixed dimension at creation)
 - Background/async compaction (synchronous only)
 - Multi-writer per collection root (per-collection file locks, no coordination)
-- Node.js / NAPI packaging (the bindings in `napi/` are legacy and frozen)
+- Node.js / NAPI bindings (removed 2026-11-22; use the `nvdb serve` HTTP API)
 
 ---
 

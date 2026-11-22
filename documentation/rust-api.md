@@ -1,6 +1,8 @@
 # nVDB Rust API Reference
 
-> Complete API documentation for the `nvdb` Rust crate.
+> **Scope: the v1 crate.** `Database`/`Collection`, LSM-Lite storage and HNSW still exist and are tested, but production retrieval runs on the v2 engine served by `nvdb serve`. See [v2-server.md](./v2-server.md) for the current design.
+>
+> Complete API documentation for the `nvdb` Rust crate (v1 API).
 
 ---
 

@@ -1,5 +1,7 @@
 # nVDB Filter DSL Reference
 
+> **Scope: the v1 crate.** These payload filters apply to `Collection::search` in the embedded v1 library. The v2 engine served by `nvdb serve` does not use this DSL — it takes typed columnar filters (`folder`, `ext`, `kind`, `status`, `mime`, ranges, promoted metadata) in its HTTP query bodies; see [v2-server.md](./v2-server.md).
+>
 > Complete guide to nVDB's MongoDB-like filter DSL for metadata filtering.
 
 ---
@@ -96,57 +98,6 @@ let results = coll.search(
 
 ---
 
-## Node.js API
-
-### FilterBuilder
-
-The `FilterBuilder` class provides static methods to construct filter JSON strings:
-
-```js
-const { FilterBuilder } = require('nvdb');
-
-// Equality
-const filter = FilterBuilder.eq('category', 'books');
-
-// Comparison
-const filter = FilterBuilder.gt('year', 2020);
-
-// Combined
-const filter = FilterBuilder.and([
-    FilterBuilder.eq('status', 'active'),
-    FilterBuilder.gte('score', 4.5)
-]);
-```
-
-### Using Filters in Search
-
-```js
-const results = coll.search({
-    vector: queryVector,
-    topK: 10,
-    filter: FilterBuilder.eq('category', 'books')
-});
-```
-
-### Raw JSON Filters
-
-You can also construct filter JSON directly:
-
-```js
-const results = coll.search({
-    vector: queryVector,
-    topK: 10,
-    filter: JSON.stringify({
-        And: [
-            { Eq: { field: 'category', value: 'books' } },
-            { Gt: { field: 'year', value: 2020 } }
-        ]
-    })
-});
-```
-
----
-
 ## Filter Operators Reference
 
 ### Comparison Operators
@@ -204,11 +155,6 @@ Find documents where category is "books":
 ```rust
 // Rust
 Filter::eq("category", "books")
-```
-
-```js
-// Node.js
-FilterBuilder.eq('category', 'books')
 ```
 
 ### Range Query
