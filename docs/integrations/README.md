@@ -1,5 +1,7 @@
 # nVDB Integrations
 
+> **Historical / not implemented.** None of the integrations in this folder — N-API, WebAssembly, gRPC — is a current production path. The `napi/` addon exists on disk but wraps only the v1 crate and is frozen; there is no WASM or gRPC code in the repository. Today nVDB is a hybrid retrieval engine served over local HTTP by `nvdb serve` — see [`../../documentation/v2-server.md`](../../documentation/v2-server.md).
+
 This directory contains integration guides for using nVDB in different environments and languages.
 
 ## Core Library vs Integrations

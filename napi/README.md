@@ -1,5 +1,7 @@
 # nVDB Node.js Native Bindings
 
+> **STATUS: legacy, not maintained.** These bindings wrap the v1 crate only and are not part of any production path. The current nVDB engine is the `nvdb serve` HTTP service — see [`../documentation/v2-server.md`](../documentation/v2-server.md).
+
 Native Node.js bindings for nVDB - a high-performance embedded vector database.
 
 Optional reranking requires building the binding with `--features rerank-onnx`:

@@ -2,21 +2,39 @@
 
 ## Project Overview
 
-nVDB is a high-performance, embedded, in-memory vector database designed for LLM workflows. It is written in Rust and provides a minimal but complete API for vector storage and similarity search.
+nVDB is a **hybrid retrieval engine** for document corpora, written in Rust. Two surfaces live in one crate:
+
+- **v2 (current, production)** — `src/v2/`: Tantivy BM25F lexical retrieval, a `content_hash`-keyed dense vector lane, RRF hybrid fusion, ONNX cross-encoder Level-2 reranking, generation-stamped ACLs and the Phase 0 sync/integrity contract. Exposed as a resident HTTP service via `nvdb serve` (`src/bin/nvdb.rs` → `src/v2/server.rs`) and as the `nvdb::v2` Rust API.
+- **v1 (legacy library)** — `Database`/`Collection`, LSM-Lite segments + WAL, HNSW, payload filter DSL (`src/lib.rs`, `src/search.rs`, `src/hnsw.rs`, `src/filter.rs`). Still compiled, tested and reachable through the CLI administration commands, but it is not what production consumers use.
+
+nVDB is a **derived index**: never the source of truth, always rebuildable. Full text lives in the authoritative store (`nDB`); nVDB stores only the hit envelope plus per-document content/envelope hashes.
+
+### Production consumers
+
+Both talk to `nvdb serve` over localhost HTTP — nothing links the crate directly.
+
+| Consumer | Integration |
+|---|---|
+| `mcp_server` | `src/agents/vdb/` — `v2-client.js` (HTTP client), `storage-connector.js`, `search-options.js` (per-request query-shape RRF overrides), `memory` agent (`memory` collection) |
+| `LLM-Gateway-Chat` | retrieval over its document corpus through the same HTTP API |
+
+Default deployment: `nvdb serve --dir <path> --host 127.0.0.1 --port 3510 --reranker-model <dir>` from a `--features rerank-onnx` build.
 
 ### Key Characteristics
 
 | Attribute | Decision | Rationale |
 |-----------|----------|-----------|
 | **Language** | Rust (Edition 2021, MSRV 1.75) | Memory safety, SIMD, no GC pauses |
-| **Deployment** | Embedded library | Single-node, application-integrated |
-| **Storage** | LSM-Lite (memtable + mmap segments) + WAL | Instant writes, zero-copy reads, durability |
-| **Serialization** | `rkyv` | True zero-copy deserialization |
+| **Deployment** | v2: standalone HTTP service (`nvdb serve`); v1: embedded library | Single node, one process per collection root |
+| **Lexical index** | Tantivy (`tantivy` 0.22) | Pure Rust, MIT, proven BM25F |
+| **Storage (v2)** | Tantivy segments + binary sidecars (`v2_manifest.json`, `acl_overlay.gen_N.bin`, `v2_fingerprints.bin`, `vectors.bin`, `vec_map.gen_N.bin`) | Cheap open, no JSON parsing on the read path |
+| **Storage (v1)** | LSM-Lite (memtable + mmap segments) + WAL | Instant writes, zero-copy reads, durability |
+| **Serialization** | `rkyv` (v1), length-prefixed binary + JSON manifests (v2) | Zero-copy where it matters |
 | **Validation** | Checksum-once, trust-after | BLAKE3/CRC64 in header; validate on open only |
-| **Index** | HNSW (configurable) | Industry-standard ANN, tunable recall |
+| **Index** | HNSW (v1 only); v2 dense lane scans flat | No ANN for v2 today — stated, not implied |
 | **SIMD** | `wide` crate | Stable Rust, portable (AVX2/AVX-512/NEON) |
-| **API** | Mongo-like, minimal | Familiar but reduced surface area |
-| **Durability** | Configurable | `Buffered` vs `FdatasyncEachBatch` |
+| **Reranking** | Optional ONNX cross-encoder, `rerank-onnx` feature | No model artifacts in a default build |
+| **Durability** | Configurable (v1) | `Buffered` vs `FdatasyncEachBatch` |
 | **Safety** | Multi-process locks | `flock` prevents dual-writer corruption |
 
 ### Project Structure
@@ -40,7 +58,9 @@ nVDB is a high-performance, embedded, in-memory vector database designed for LLM
 │   ├── compaction.rs       # Segment compaction and index rebuild
 │   ├── lock.rs             # Multi-process locking (flock)
 │   ├── id.rs               # Internal/external ID mapping
-│   ├── bin/nvdb.rs         # CLI (init/search/… and `serve` for the v2 HTTP front end)
+│   ├── rerank.rs           # Reranker trait (v1 + v2 Level-2 use it)
+│   ├── rerank_onnx.rs      # OnnxReranker, `rerank-onnx` feature only
+│   ├── bin/nvdb.rs         # CLI (v1 admin commands + `serve` for the v2 HTTP service)
 │   └── v2/                 # Phase 2/3: Tantivy lexical + hybrid retrieval (additive)
 │       ├── mod.rs          # Public surface + V2Error
 │       ├── schema.rs       # V2CollectionConfig, VectorLaneConfig, V2Document, hashes
@@ -63,18 +83,27 @@ nVDB is a high-performance, embedded, in-memory vector database designed for LLM
 │   ├── phase3_hnsw_tests.rs
 │   ├── phase4_filter_tests.rs
 │   └── phase5_compaction_tests.rs
-├── benches/                # Criterion benchmarks
+├── benches/                # Criterion benchmarks (v1 paths)
 │   ├── bench_search.rs
 │   ├── bench_insert.rs
 │   └── bench_recovery.rs
-├── docs/                   # Documentation
-│   ├── README.md           # Documentation index
-│   ├── development-plan.md # Development phases and roadmap
-│   ├── test-documentation.md # Test suite documentation
-│   ├── user-guide.md       # User-facing API guide
-│   └── handover-*.md       # Phase completion notes
-└── examples/               # Usage examples
+├── documentation/          # Reference docs: v2-server.md (current) plus
+│                           # architecture/rust-api/filter-dsl/nodejs-api (v1-era)
+├── docs/                   # Working notes and history
+│   ├── README.md           # Docs index
+│   ├── user-guide.md       # v1 API guide
+│   ├── integration-guide.md
+│   ├── scope-and-boundaries.md
+│   ├── test-documentation.md
+│   ├── adr/                # v1 architecture decision records
+│   ├── integrations/       # v1-era language guides (napi, wasm, grpc)
+│   └── archive/            # historical plans and phase handovers
+├── napi/                   # LEGACY: napi-rs bindings for the v1 crate
+│   └── ...                 # not built, not tested, not a production path
+└── examples/               # v1 usage examples (web_service.rs is commented out)
 ```
+
+`napi/` remains a workspace member (`Cargo.toml` → `members = [".", "napi"]`) and still builds a `cdylib` on request, but it is frozen: it wraps the v1 API only, has no v2 surface, carries stale prebuilt `.node` binaries and is not used by any production consumer. Do not advertise it. If a task asks for Node bindings, treat that as a new project.
 
 ### Core Dependencies
 
@@ -93,6 +122,8 @@ byteorder = "1.5"        # Byte order handling
 bincode = "1.3"          # Binary serialization
 fastrand = "2.0"         # Fast random number generation
 tantivy = "0.22"         # Phase 2 lexical engine (MIT, pure Rust)
+ort = "2.0.0-rc.15"      # Optional, `rerank-onnx` only
+tokenizers = "0.22.2"    # Optional, `rerank-onnx` only
 ```
 
 Phase 3 adds **no** crate: the vector lane reuses `crate::distance` (SIMD),
@@ -108,12 +139,26 @@ Phase 3 adds **no** crate: the vector lane reuses `crate::distance` (SIMD),
 # Build debug version
 cargo build
 
-# Build release version (optimized)
-cargo build --release
+# Build release version with the Level-2 ONNX reranker
+cargo build --release --features rerank-onnx
 
 # Build and open documentation
 cargo doc --open
 ```
+
+`rerank-onnx` is the only feature (`Cargo.toml`: `rerank-onnx = ["dep:ort", "dep:tokenizers"]`). Without it, `nvdb::rerank_onnx` and `--reranker-model` do not exist; with it, a model that fails to load aborts startup.
+
+### Running the HTTP service
+
+```bash
+# default: 127.0.0.1:3510, no reranker
+nvdb serve --dir <collection-root>
+
+# with Level-2 reranking (needs a rerank-onnx build and <dir>/model.onnx + <dir>/tokenizer.json)
+nvdb serve --dir <collection-root> --host 0.0.0.0 --port 3510 --reranker-model <model-dir>
+```
+
+Every direct subdirectory of `--dir` holding a `v2_manifest.json` is adopted at startup; one that fails to open aborts the process. `GET /health` reports `reranker_loaded`, which is how you tell "not configured" apart from "configured but rejected a request".
 
 ### Testing
 
@@ -158,15 +203,14 @@ cargo bench --bench bench_recovery
 ### Running Examples
 
 ```bash
-# Basic usage example
+# Basic usage example (v1 API)
 cargo run --example basic_usage
 
-# RAG system example
+# RAG system example (v1 API)
 cargo run --example rag_system
-
-# Web service example
-cargo run --example web_service
 ```
+
+`examples/web_service.rs` is fully commented out and references an `axum` feature that does not exist — do not advertise it. The v2 service is built in, not an example.
 
 ---
 
@@ -364,7 +408,9 @@ unsafe {
 
 ## Architecture Overview
 
-### Storage Model (LSM-Lite)
+### Storage Model (LSM-Lite — v1 crate)
+
+The v1 surface below is still compiled and tested but is not used by production consumers; the v2 engine stores Tantivy segments plus binary sidecars (see "Lexical Retrieval Engine" below).
 
 | Component | Purpose | Mutability |
 |-----------|---------|------------|
@@ -427,21 +473,21 @@ Phase 1's kill-switch verdict: **embed Tantivy (MIT, pure Rust)** behind our own
 | `v2_manifest.json` | atomic rename | `config`, `acl_generation`, `watermark`, `doc_count` |
 | `acl_overlay.gen_<N>.bin` | tmp + `sync_all` + rename | authoritative ACL map per generation; compact binary, group sets interned (`doc_id -> set index`) |
 | `v2_fingerprints.bin` | atomic rename | per-document `content_hash` / `envelope_hash` / `no_acl_hash` as raw 32-byte BLAKE3 digests |
-| `vectors.bin` | tmp + `sync_all` + rename | content-addressed embeddings, key `(content_hash, model_version)` — identical text is embedded once |
+| `vectors.bin` | append (v1 files: one-time tmp + rename upgrade) | content-addressed embeddings, key `(content_hash, model_version)` — identical text is embedded once |
 | `vec_map.gen_<N>.bin` | tmp + `sync_all` + rename | `doc_id -> content_hash` links per generation; the manifest names the live one (`vec_generation`) and superseded generations are deleted after the swap |
 
 Both sidecars are length-prefixed binary, not JSON: `open()` is a read path, and parsing megabytes of JSON (26k entries) cost ~20 ms for nothing. An `IndexWriter` is created on the **first write**, never on open.
 
 **Open-time contract:** `schema_version`, `analyzer_version` and `lexicon_version` must match the manifest, and `promoted_fields` must be identical — otherwise `V2Error::VersionMismatch` / `SchemaMismatch`. A differing analyzer is never silently tolerated. (`schema_version` 2 = unstored `body`, fast `id`/`parent_id`, binary sidecars; `analyzer_version` 2 = one canonical token per word.)
 
-**Analyzers** (registered on every open): `nvdb_exact` (trim + lowercase, whole string), `nvdb_identifier` (whole token + sub-tokens on `/ \ . - _ :`), `nvdb_text` (Unicode word segmentation + lowercase, then `ä->ae, ö->oe, ü->ue, ß->ss` folded into **one** canonical token per word, so `Förderprogramm` and `Foerderprogramm` are the same term and BM25 length norms stay exact).
+**Analyzers** (registered on every open): `nvdb_exact` (trim + lowercase, whole string), `nvdb_identifier` (whole token + sub-tokens on `/ \ . - _ :` **plus** the extension-stripped stem of the last path segment when that segment ends in a 1–5 character ASCII-alphanumeric extension, so `md-blocks-spec` matches `md-blocks-spec.md` as one token), `nvdb_text` (Unicode word segmentation + lowercase, then `ä->ae, ö->oe, ü->ue, ß->ss` folded into **one** canonical token per word, so `Förderprogramm` and `Foerderprogramm` are the same term and BM25 length norms stay exact).
 
 **Stored vs indexed fields:** `id`, `parent_id` (both `STRING | STORED | FAST`), `chunk_index`, `kind`, `title`, `path`, `name`, `folder`, `ext`, `mime`, `status`, `created_at`, `updated_at`, non-empty `metadata`, and the opt-in `excerpt` (≤ 1 KB) are stored. `title_exact`, `headings`, `categories`, `tags`, `body`, `body_parts` are indexed only — `nVDB` is a derived indexer, full content lives in `nDB`.
 
 **German compounds:** `decompose_german_compound` is a deterministic fewest-parts DP over a frozen, versioned lexicon (500+ morphemes, umlauts folded, Fugenlaute `s/es/n/en/er`, parts ≥ 4 chars). Index time writes `body_parts` (lexicon prefixes of every word + nested decomposition); query time searches the *same* term set against `body_parts` only, at `FieldWeights::body_parts = 0.35` — strictly below `body` (1.0) and `title` (4.0), so a document holding the exact compound always outranks one holding only its parts. Both directions therefore work: compound query → component document, component query → compound document. `GERMAN_LEXICON_VERSION` gates the index.
 
 **Two-phase search:**
-- *Phase A* — one weighted `BooleanQuery` over `title_exact`, `title`, `path`, `name`, `headings`, `categories`, `tags`, `body`, `body_parts` (`FieldWeights`), with `Occur::Must` columnar filters (`folder`, `ext`, `kind`, `status`, `mime`, `created_at`/`updated_at` ranges, typed promoted columns), a postings-only `PhraseQuery` boost on `title`/`body` for queries of 2..=6 terms (`×1.5`), and, when `fuzzy_edits > 0`, a distance-1 `FuzzyTermQuery` (transposition cost 1) at `×0.25` per non-numeric term ≥ 4 chars on `title` and `body`, capped at the first 6 terms. Fetch `max(top_k * 20, 200)`, widening ×5 up to 4 rounds. Zero document-store reads.
+- *Phase A* — one weighted `BooleanQuery` over `title_exact`, `title`, `path`, `name`, `headings`, `categories`, `tags`, `body`, `body_parts` (`FieldWeights`; defaults `8.0 / 4.0 / 3.0 / 3.0 / 2.5 / 2.0 / 2.0 / 1.0 / 0.35`), with `Occur::Must` columnar filters (`folder`, `ext`, `kind`, `status`, `mime`, `created_at`/`updated_at` ranges, typed promoted columns), a postings-only `PhraseQuery` boost for queries of 2..=32 terms — `TITLE_PHRASE_BOOST` ×2 on `title`, `BODY_PHRASE_BOOST` ×10 on `body` (applied to the field weight), an `ALL_TERMS_BOOST` ×4 conjunction clause, and, when `fuzzy_edits > 0`, a distance-1 `FuzzyTermQuery` (transposition cost 1) at `×0.25` per non-numeric term ≥ 4 chars on `title` and `body`, capped at the first 6 terms. A single-token query that is exactly a filename stem also gets `NAME_EXACT_BOOST` ×6 against `name` and `path`; split parts stay unboosted and multi-word queries are unaffected (herrbasan/nVDB#4). Fetch `max(top_k * 20, 200)`, widening ×5 up to 4 rounds. Zero document-store reads.
 - *Phase B* — walk the Phase A order and read **only** `id`/`parent_id` from fast fields to enforce the authoritative ACL overlay (fail-closed) and the native `group_by_parent` cap; stop as soon as `top_k` winners exist; hydrate the stored envelope for those winners alone. `explain` (coverage, matched terms, phrase flag, counters) is computed only when `query.explain == true`, from the stored `title`/`path`.
 
 **ACL:** never read from segments. `update_acl_only` bumps the overlay generation and rewrites overlay + manifest atomically — no re-index, immediately visible. An absent document, an empty group list, or empty principals is not visible.
@@ -490,7 +536,10 @@ part of the open-time schema contract — a changed dimension or model version i
 
 **Keyed by content, never by id.** `vectors.bin` maps
 `(content_hash, model_version) -> Vec<f32>`, so two documents with identical
-searchable text share one embedding. `vec_map.gen_<N>.bin` holds the mutable
+searchable text share one embedding. The file is **append-only**: `attach_vectors`
+appends new records instead of rewriting the store, and a legacy v1 fixed-count
+file is upgraded once, atomically, on the first append
+(`VECTORS_FORMAT_VERSION_V1`). `vec_map.gen_<N>.bin` holds the mutable
 `doc_id -> content_hash` links, generation-stamped like the ACL overlay:
 new generation file → `manifest.vec_generation` swap → cleanup of superseded
 generations. **Immutable segments are never touched by a vector attach.**
@@ -519,10 +568,22 @@ with the ACL overlay; otherwise it checks `acl_overlay.is_visible` while scannin
 the link map. Similarity is higher-is-better and consistent with
 `src/search.rs::compute_score` (cosine is already a similarity; Euclidean is
 `1/(1+d)`). `rrf = lw/(rrf_k + lex_rank) + vw/(rrf_k + vec_rank)` with 1-based
-ranks, `rrf_k = 60`, `candidate_k = 200`, both weights `1.0` by default.
+ranks, `rrf_k = 60`, `candidate_k = 200`, `lexical_weight = 1.0`,
+`vector_weight = 0.3` by default (`DEFAULT_RRF_K`, `DEFAULT_CANDIDATE_K` in
+`query.rs`). All are per-request wire fields, so a client may override them
+(`mcp_server` does: adaptive query-shape weights with `rrfK: 20`).
 `group_by_parent` is applied **once** on the fused order, then `top_k` winners are
 hydrated — vector-only winners included. `dense` defaults to
 `query_vector.is_some()` in the wire form.
+
+**Lexical spike preservation.** When `vector_weight > lexical_weight` and both
+lanes run, the engine computes a BM25 baseline: the score of the
+`LEXICAL_SPIKE_BASELINE_PARENTS` (5) distinct parent in the lexical lane. A
+candidate scoring `>= 2.5 ×` that baseline (`LEXICAL_SPIKE_RATIO`) is an exact
+outlier — phrase, title-exact or all-terms hit — and gets effective lexical
+weight `max(lexical_weight, vector_weight × 1.1)`. Flat topical queries sit at
+1.1–1.4× the baseline; verbatim hits land at 6–45×. This keeps a correct exact
+match on top without raising lexical weight for every query (herrbasan/nVDB#5).
 
 **Refinement (Level 2).** `refine_level2(query_text, principals, hits, source,
 reranker, options)` takes the first `shortlist` (20) survivors. With a
@@ -546,10 +607,45 @@ of implying an index that does not exist.
 
 ## API Quick Reference
 
-### Database Operations
+### v2 (production surface)
 
 ```rust
-let db = Database::open(path)?;              // Open or create
+use nvdb::v2::{
+    V2CollectionConfig, V2Document, V2HybridQuery, V2Index, V2Query, VectorLaneConfig,
+};
+
+let config = V2CollectionConfig::with_vector_lane(VectorLaneConfig::new(4, "demo-4d"));
+let mut index = V2Index::create_or_open("data/docs", config)?;
+let mut doc = V2Document::new("doc-1", "doc");
+doc.title = "Förderprogramm Digitalisierung".into();
+doc.path = "programs/foerderprogramm-digitalisierung.md".into();
+doc.body = "Die Richtlinie beschreibt das Förderprogramm.".into();
+doc.acl = vec!["public".into()];
+index.upsert(doc)?;
+index.commit()?;
+
+// Lexical / filter-only. Principals are mandatory.
+let hits = index.search(&V2Query::new("foerder").principals(["public"]).top_k(5))?;
+
+// Hybrid (needs the vector_lane above).
+let hits = index.hybrid_search(
+    &V2HybridQuery::new(V2Query::new("foerderprogramm").principals(["public"]))
+        .vector(vec![0.10, 0.20, 0.30, 0.40])
+        .candidate_k(200),
+)?;
+
+let pending = index.next_pending_embeddings(100);  // live ∧ ¬has_vector
+// index.attach_vectors(...) — CAS on (id, content_hash, model_version)
+```
+
+The HTTP service is the same surface with JSON bodies; see the route table above.
+
+### v1 (legacy crate surface)
+
+Still compiled and tested; used by the CLI administration commands, not by production consumers.
+
+```rust
+let db = Database::open(path)?;                  // Open or create
 let coll = db.create_collection(name, config)?;  // New collection
 let coll = db.get_collection(name)?;             // Existing collection
 let names = db.list_collections();               // List collections
@@ -606,19 +702,19 @@ coll.delete_index()?;                        // Remove HNSW index
 
 **When modifying code, you MUST update corresponding documentation:**
 
-1. `docs/development-plan.md` - Update when changing phase deliverables, success criteria, or technical decisions. Add entries to the Decision Log.
+1. `documentation/v2-server.md` — the current reference for the v2 engine, collection layout, retrieval pipeline and HTTP API. Update when routes, wire types, defaults, fusion weights, reranking behaviour or on-disk artifacts change.
 
-2. `docs/test-documentation.md` - Update when:
-   - Adding, removing, or modifying tests
-   - Changing test data characteristics
-   - Updating success criteria verification
-   - Adding new test suites or phases
+2. `README.md` — human-facing overview. Keep it accurate about what nVDB is today; it must never claim Node.js bindings or features that do not exist.
 
-3. `AGENTS.md` (this file) - Update when:
+3. `AGENTS.md` (this file) — Update when:
    - Changing architectural decisions
    - Modifying file formats or protocols
    - Adding new constraints or non-goals
    - Changing build/test commands
+
+4. `docs/test-documentation.md` — Update when adding or removing test suites (note: much of it describes v1 phases).
+
+Historical working notes live in `docs/archive/`; leave them unless they are actively misleading.
 
 **Documentation that does not match code is a bug.**
 
@@ -630,13 +726,14 @@ coll.delete_index()?;                        // Remove HNSW index
 - Distributed operation (use application-layer sharding if needed)
 - ACID transactions across multiple documents
 - Complex query language (no joins, aggregations)
-- Network protocol (embedded only)
+- ANN/approximate search on the v2 dense lane (flat scan only; v1 has HNSW)
 - Schema migrations within a collection (fixed dimension at creation)
-- Background/async compaction for v1.0 (synchronous only)
-- Multi-writer per collection (single writer enforced)
+- Background/async compaction (synchronous only)
+- Multi-writer per collection root (per-collection file locks, no coordination)
+- Node.js / NAPI packaging (the bindings in `napi/` are legacy and frozen)
 
 ---
 
-*See `docs/development-plan.md` for detailed development phases.*
-*See `docs/test-documentation.md` for test suite details.*
-*See `docs/user-guide.md` for API usage examples.*
+*See `documentation/v2-server.md` for the current engine and HTTP reference.*
+*See `docs/test-documentation.md` for test suite details (largely v1-era).*
+*See `docs/user-guide.md` for v1 API usage examples.*

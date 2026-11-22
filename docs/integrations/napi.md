@@ -1,5 +1,7 @@
 # nVDB N-API Integration (Node.js Native)
 
+> **STATUS: legacy, not maintained.** The `napi/` addon wraps only the v1 crate, has no v2 surface and is not used by any production consumer. Do not start new work against this guide. The current engine is the `nvdb serve` HTTP service — see [`../../documentation/v2-server.md`](../../documentation/v2-server.md).
+>
 > **Full native performance for Node.js applications**  
 > **Version:** 0.1.0  
 > **Last Updated:** 2026-02-15

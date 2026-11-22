@@ -1,355 +1,197 @@
 # nVDB
 
-> High-performance embedded vector database for AI/ML workflows.
+> Hybrid retrieval engine for document corpora — Tantivy BM25F + dense vectors, fused by rank, reranked by an ONNX cross-encoder, served over a local HTTP API.
 
-nVDB is an **embedded retrieval database** with SIMD-accelerated vector search, native BM25 lexical search, hybrid rank fusion, optional HNSW search, and MongoDB-like metadata filtering. Standalone embeddable database for Node.js and Rust applications.
+nVDB is a **derived retrieval index**: it is rebuilt from an authoritative source (a document store such as `nDB`) and never owns the data. One Rust crate (`nvdb`) plus one executable (`nvdb serve`) give you:
 
-> **⚠️ BREAKING CHANGE (v3 Architecture)**
-> nVDB has transitioned to a **Database-as-a-Folder** architecture natively managed in Rust. Collections are now isolated folders containing `meta.json` (dimensionality and schemas) and data structures. Native delta operations like `patchPayload` replace total re-writes, drastically reducing I/O when only updating metadata on vectors.
+- **Lexical retrieval on Tantivy** — weighted BM25F across title, path, name, headings, categories, tags and body, with exact-identifier, filename-stem, phrase and German-compound matching.
+- **Dense retrieval** keyed by content hash, so identical text is embedded once and metadata/ACL edits never trigger re-embedding.
+- **Hybrid fusion** of both lanes by Reciprocal Rank Fusion, with per-parent diversity caps.
+- **Level-2 reranking** with an ONNX cross-encoder over the fused shortlist, re-verified against the ACL before scoring.
+- **ACL-gated results** — a query must carry principals; a revoked document is never scored, echoed or counted.
+
+Everything runs in one process against one directory. There is no cluster, no external service and no model bundled into the binary.
+
+## Quick start
+
+Build with the reranker feature (required for `--reranker-model`):
+
+```bash
+cargo build --release --features rerank-onnx
+```
+
+Start the service. Each collection is a direct subdirectory of `--dir`; every direct subdirectory containing a `v2_manifest.json` is adopted at startup, and a collection that will not open aborts startup rather than disappearing quietly.
+
+```bash
+./target/release/nvdb serve --dir ./nvdb-data --host 127.0.0.1 --port 3510 \
+  --reranker-model ./models/bge-reranker
+```
+
+`--host` defaults to `127.0.0.1`, `--port` to `3510`. Pass `--host 0.0.0.0` for LAN access. `--reranker-model` expects a directory holding `model.onnx` and `tokenizer.json`; it is only available in a `rerank-onnx` build, and a model that fails to load aborts startup. Without the flag, `/level2` answers `503 reranker_not_configured` — it never silently degrades to Level-1 ordering.
+
+Create a collection, index a document, query it:
+
+```bash
+# Collection with a dense lane (needed for hybrid_search).
+# dim/model_version must match the embeddings you attach later.
+# Omit "vector_lane" for a lexical-only collection.
+curl -s -X POST http://127.0.0.1:3510/v2/collections \
+  -d '{"name":"docs","config":{"vector_lane":{"dim":4,"model_version":"demo-4d"}}}'
+
+curl -s -X POST http://127.0.0.1:3510/v2/collections/docs/upsert \
+  -d '{"docs":[{
+        "id":"doc-1",
+        "kind":"doc",
+        "title":"Förderprogramm Digitalisierung",
+        "path":"programs/foerderprogramm-digitalisierung.md",
+        "body":"Die Richtlinie beschreibt das Förderprogramm.",
+        "acl":["public"]
+      }]}'
+
+# Lexical / filter-only search (principals are mandatory)
+curl -s -X POST http://127.0.0.1:3510/v2/collections/docs/search \
+  -d '{"text":"foerder","principals":["public"],"top_k":5}'
+
+# Hybrid: lexical + dense lanes fused into one ranking
+curl -s -X POST http://127.0.0.1:3510/v2/collections/docs/hybrid_search \
+  -d '{"lexical":{"text":"foerderprogramm","principals":["public"],"top_k":10},
+       "query_vector":[0.10,0.20,0.30,0.40],"candidate_k":200}'
+```
+
+Vectors are attached out of band. The index exposes what it still needs and accepts completions with a compare-and-set:
+
+```bash
+curl -s 'http://127.0.0.1:3510/v2/collections/docs/pending_embeddings?limit=100'
+# content_hash comes from that pending list; model_version must equal the lane config.
+curl -s -X POST http://127.0.0.1:3510/v2/collections/docs/attach_vectors \
+  -d '{"attachments":[{"id":"doc-1","content_hash":"<hex from pending_embeddings>","model_version":"demo-4d","vector":[0.10,0.20,0.30,0.40]}]}'
+```
 
 ## Features
 
-- **SIMD-accelerated search** — AVX2/AVX-512/NEON via the `wide` crate (8-wide `f32x8`)
-- **Native BM25 lexical search** — exact terms, titles, paths and identifiers over payload fields
-- **Hybrid retrieval** — dense + lexical lanes fused by Reciprocal Rank Fusion with lane diagnostics
-- **Diversity controls** — cap chunks per payload group before returning the shortlist
-- **Rerank-ready results** — wide candidate recall designed for an optional query-document reranker
-- **Optional ONNX CPU reranker** — `rerank-onnx` feature; small multilingual cross-encoder, top-N only
-- **HNSW approximate search** — Sub-linear search with configurable recall/latency tradeoffs
-- **LSM-Lite storage** — Memtable + memory-mapped segments + WAL for crash recovery
-- **Zero-copy reads** — Memory-mapped segments mean instant startup, no loading
-- **MongoDB-like filters** — Query by metadata with a familiar DSL
-- **Multiple collections** — Different embedding models in one database
-- **Node.js native bindings** — napi-rs powered, zero-copy where possible
-- **Crash-safe** — WAL ensures no data loss on power failure
+### Lexical lane (Tantivy BM25F)
 
-## Quick Start
+- **Field weights** (defaults): `title_exact` 8.0, `title` 4.0, `path` 3.0, `name` 3.0, `headings` 2.5, `categories` 2.0, `tags` 2.0, `body` 1.0, `body_parts` 0.35. Override per collection via `config.field_weights`.
+- **Exact identifiers and filename stems** — a query that is a filename stem (`md-blocks-spec`) matches `name`/`path` as a whole token; separator-split parts remain available but unboosted. Only extension-stripped stems with a 1–5 character ASCII extension qualify.
+- **German compounds** — a frozen, versioned lexicon decomposes compounds at index time into `body_parts`; queries search the same derived terms, so `Förderprogramm` ↔ `Foerderprogramm` and compound ↔ component both resolve. An exact compound outranks a document that merely contains the parts.
+- **Phrase and conjunction boosts** — postings-only phrase boost on `title` (×2) and `body` (×10) for 2–32 term queries, plus an all-terms conjunction boost. Longer verbatim quotes keep their boost; they used to silently lose it past 8 terms.
+- **Opt-in fuzzy** — `fuzzy_edits` (Levenshtein distance) expands up to the first six non-numeric terms of four or more characters at ×0.25, so typo tolerance is added without displacing correct exact matches.
+- **Two-phase search** — Phase A is pure postings work with columnar `Must` filters and no document-store reads. Phase B reads only `id`/`parent_id` from fast fields to enforce the ACL overlay and `group_by_parent`, then hydrates just the winners.
+- **Columnar filters** — `folder`, `ext`, `kind`, `status`, `mime`, `created_at`/`updated_at` ranges, plus promoted metadata fields typed as `string`, `i64`, `f64` or `bool`.
+- **Explanations** — `explain: true` returns coverage, matched terms, a phrase flag and counters per hit.
 
-### Rust
+### Dense lane
 
-```rust
-use nvdb::{Database, CollectionConfig, Document, Distance, Search};
-use serde_json::json;
+- **Keyed by content, not by id** — `(content_hash, model_version) → vector`. Two documents with the same searchable text share one embedding; an ACL or metadata edit changes the envelope hash but not the content hash, so nothing is re-embedded.
+- **Append-only `vectors.bin`** — attachments append records; legacy v1 fixed-count files are upgraded once, atomically, on first attach.
+- **Derived pending list** — `GET /pending_embeddings` is computed from `live ∧ ¬has_vector`; there is no durable queue that can drift.
+- **Compare-and-set attachment** — the whole batch is validated (dimension, finiteness, model version, liveness, hash equality) before anything is written. One stale completion rejects the batch with `409 stale_vector_cas` instead of half-applying it.
+- **Flat scan today** — `flat_search_cutoff` (default 50 000) records the intended ANN policy; v2 always scans the content-hash map. No HNSW index is built for the v2 lane.
 
-// Open a database
-let db = Database::open("./data")?;
+### Hybrid fusion
 
-// Create a collection with 768-dimensional vectors
-let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
+- **RRF** — `score = lw/(rrf_k + lex_rank) + vw/(rrf_k + vec_rank)`, 1-based ranks. Defaults: `rrf_k` 60, `candidate_k` 200, `lexical_weight` 1.0, `vector_weight` 0.3. All are per-request fields on `hybrid_search`.
+- **Lexical spikes survive vector-heavy weighting** — when `vector_weight > lexical_weight`, a candidate whose BM25 score is at least 2.5× the fifth distinct-parent lexical hit is treated as an exact outlier (phrase, title-exact, all-terms) and keeps effective lexical weight. Flat topical queries sit around 1.1–1.4×; verbatim hits land at 6–45×.
+- **Diversity after fusion** — `group_by_parent` (with `max_per_parent`) is applied once on the fused order, then `top_k` winners are hydrated, vector-only winners included.
+- **Lane authority** — the dense lane honours the same filters and ACL overlay as the lexical lane.
 
-// Insert a document
-coll.insert(Document {
-    id: "doc1".to_string(),
-    vector: vec![0.1; 768],
-    payload: Some(json!({"title": "Hello world", "category": "greeting"})),
-})?;
+### Level-2 reranking
 
-// Flush to segment
-coll.flush()?;
+`POST /v2/collections/{name}/level2` refines Level-1 hits:
 
-// Search
-let query = vec![0.1; 768];
-let results = coll.search(
-    Search::new(&query)
-        .top_k(10)
-        .distance(Distance::Cosine)
-)?;
+- Hits the ACL overlay does not grant to the caller are dropped **before** anything else. Level 1 is evidence, not permission.
+- Survivors are capped at `shortlist` (default 20) *after* the ACL filter.
+- Reranker text is the caller's `texts[id]`, else the hit `excerpt`, else `title + " " + path`.
+- The reranker must return exactly one finite score per document (else `500 rerank_failed`). Scores fuse with the Level-1 order by weighted RRF (`LEVEL2_RRF_K` 60, Level-1 weight 1.0 vs `rerank_weight`, default 0.2).
+- If the best rerank score is below `relevance_floor` (default 0.02), the result is marked `rejected: true` while the hits are still returned as low-relevance evidence.
 
-for m in &results {
-    println!("{}: score={:.4}", m.id, m.score);
-}
+### Sync, ACL and integrity
+
+- **Two hashes** — `content_hash` covers searchable text and gates embedding reuse. `envelope_hash` covers the canonical full envelope including sorted ACL and canonical metadata, so ACL-only and metadata-only changes are never treated as no-ops.
+- **Generation-stamped ACL overlay** — `update_acl_only` rewrites `acl_overlay.gen_<N>.bin` and the manifest atomically. No re-index, immediately visible. Absent documents, empty ACLs and empty principal lists are all invisible; a query without principals fails with `MissingPrincipals`.
+- **Watermark contract** — the index commits the highest contiguous synced sequence. A changed source epoch, a cursor ahead of the source, or an expired cursor forces a clean snapshot rebuild rather than incremental drift. A failed apply persists `degraded` and reads fail until a rebuild heals.
+- **Integrity checks** — `GET /fingerprints` exports per-document hashes; `POST /integrity_check` compares them against the source snapshot and can report tracked documents that still lack a vector.
+
+## HTTP API
+
+All routes are JSON. Writes accept `commit` (default `true`) except `attach_vectors`, which commits its own link generation.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Engine name, collection names, `reranker_loaded` |
+| `GET` | `/v2/collections` | Collection names with `doc_count`, `acl_generation`, `watermark` |
+| `POST` | `/v2/collections` | Create a collection (`name`, optional `config`) |
+| `POST` | `/v2/collections/{name}/upsert` | Upsert documents |
+| `POST` | `/v2/collections/{name}/delete` | Delete ids |
+| `POST` | `/v2/collections/{name}/acl` | Update one document's ACL |
+| `POST` | `/v2/collections/{name}/commit` | Commit pending writes |
+| `POST` | `/v2/collections/{name}/search` | Lexical / filter-only query |
+| `POST` | `/v2/collections/{name}/hybrid_search` | Lexical + dense fusion |
+| `GET` | `/v2/collections/{name}/pending_embeddings` | Documents awaiting vectors |
+| `POST` | `/v2/collections/{name}/attach_vectors` | CAS vector attachment |
+| `GET` | `/v2/collections/{name}/fingerprints` | Per-document content/envelope hashes |
+| `POST` | `/v2/collections/{name}/integrity_check` | Compare against expected fingerprints |
+| `POST` | `/v2/collections/{name}/watermark` | Persist the sync watermark |
+| `POST` | `/v2/collections/{name}/level2` | ACL re-check + cross-encoder rerank |
+
+Errors are `{"error": "...", "code": "..."}`. Notable codes: `400` malformed body, `MissingPrincipals`, `WrongDimension`, `vector_lane_not_configured`, `invalid_watermark`; `403` a non-v2 directory the server refuses to take over; `404` unknown route or collection; `409` schema/config conflict or `stale_vector_cas`; `500` IO/corruption/`rerank_failed`; `503` `index_degraded` or `reranker_not_configured`. Collection names match `[a-zA-Z0-9._-]+`, and `.`/`..` are rejected, so a name cannot escape the collection root.
+
+The server is hand-rolled HTTP/1.1 on `std::net`: one thread per connection behind a 64-connection cap, keep-alive, 30 s I/O timeouts, 64 MB request-body cap (`413` above it).
+
+## CLI
+
+`nvdb serve` runs the service. The remaining commands are the v1 single-collection administration surface:
+
+```
+nvdb init <path> --dim N        initialize a collection
+nvdb info|verify|compact <path> inspect, check, compact in place
+nvdb export|import|merge ...    move data between databases
+nvdb dump <path>                JSON Lines to stdout
+nvdb config get|set ...         metadata/config
+nvdb search <path> <vector>     vector search (v1)
+nvdb rebuild-index <path>       rebuild the v1 HNSW graph
 ```
 
-### Node.js
+## Build and test
 
-```js
-const { Database } = require('nvdb');
+```bash
+# debug build
+cargo build
 
-const db = new Database('./data');
-const coll = db.createCollection('embeddings', 768);
+# release build with the Level-2 reranker
+cargo build --release --features rerank-onnx
 
-// Insert
-coll.insert('doc1', vector768, JSON.stringify({ title: 'Hello world' }));
+# all test suites (v1 + v2 engine, server, hybrid, sync contract)
+cargo test
 
-// Search
-const results = coll.search({
-    vector: queryVector,
-    topK: 10,
-    distance: 'cosine'
-});
+# one suite
+cargo test --test phase3_v2_hybrid_tests
 
-for (const match of results) {
-    console.log(`${match.id}: score=${match.score.toFixed(4)}`);
-}
+# benchmarks
+cargo bench
+
+# API docs
+cargo doc --open
 ```
 
-### Hybrid retrieval
+MSRV is Rust 1.75. `rerank-onnx` is the only optional feature; it pulls in `ort` and `tokenizers`, and without it both the ONNX reranker module and `--reranker-model` are unavailable.
 
-Lexical fields are declared at collection creation. The same fields are maintained on insert, update, delete, flush and reopen.
+## Design boundaries
 
-```rust
-use nvdb::{HybridSearch, LexicalField};
-
-let coll = db.create_collection(
-    "documents",
-    CollectionConfig::new(768).with_lexical_fields(vec![
-        LexicalField::new("title").with_weight(3.0),
-        LexicalField::new("path").with_weight(2.0),
-        LexicalField::new("body"),
-    ]),
-)?;
-
-coll.insert(Document {
-    id: "doc1".to_string(),
-    vector: vec![0.1; 768],
-    payload: Some(json!({
-        "title": "Consciousness Is the Record",
-        "path": "blog/consciousness-is-the-record.md",
-        "body": "…"
-    })),
-})?;
-
-let results = coll.hybrid_search(
-    &HybridSearch::new(&query_vector, "Consciousness Is the Record")
-        .top_k(10)
-        .candidate_k(100)
-        .diversity("path", 3),
-)?;
-
-for hit in results {
-    println!(
-        "{} fused={:.4} dense_rank={:?} lexical_rank={:?}",
-        hit.id, hit.score, hit.vector_rank, hit.lexical_rank
-    );
-}
-```
-
-Node.js:
-
-```js
-const coll = db.createCollection('documents', 768, {
-    durability: 'buffered',
-    lexicalFields: [
-        { field: 'title', weight: 3 },
-        { field: 'path', weight: 2 },
-        { field: 'body', weight: 1 }
-    ]
-});
-
-const results = await coll.hybridSearch({
-    vector: queryVector,
-    text: 'Consciousness Is the Record',
-    topK: 10,
-    candidateK: 100,
-    groupBy: 'path',
-    maxPerDocument: 3
-});
-```
-
-`hybridSearch` returns fused `score`, raw `vectorScore`, raw `lexicalScore`, and one-based `vectorRank` / `lexicalRank` per result. Raw cosine and BM25 scores are lane diagnostics; use the fused score for ordering.
-
-### Optional ONNX CPU reranker
-
-Enable the feature and use a small cross-encoder over the top candidates:
-
-```toml
-nvdb = { version = "0.1", features = ["rerank-onnx"] }
-```
-
-```rust
-use nvdb::{OnnxReranker, OnnxRerankerConfig};
-
-let reranker = OnnxReranker::load(OnnxRerankerConfig::new(
-    "/models/reranker.onnx",
-    "/models/tokenizer.json",
-))?;
-
-let results = coll.hybrid_search_reranked(
-    &HybridSearch::new(&query_vector, "Consciousness Is the Record")
-        .top_k(10)
-        .candidate_k(200)
-        .diversity("path", 2),
-    &reranker,
-    "content", // payload field holding candidate text
-    0.2,       // blend weight: 80% RRF, 20% reranker
-    10,        // rerank only the top 10
-)?;
-```
-
-The optional backend loads an external ONNX sequence-classification model and
-`tokenizer.json`; nVDB stays free of model artifacts and inference SDKs unless
-the feature is enabled. `rrf_score` preserves the pre-rerank ordering signal and
-`rerank_score` exposes the model score.
+- **No embedding generation.** The caller produces vectors; nVDB stores, keys and searches them.
+- **Derived, rebuildable state.** The source of truth lives elsewhere; the index is always reconstructible.
+- **Single node, single process per collection root.** Multi-writer safety comes from per-collection file locks, not coordination.
+- **No transactions across documents, no joins, no aggregations.**
+- **Flat dense scan.** Approximate search is not implemented for the v2 lane.
 
 ## Documentation
 
 | Document | Description |
-|----------|-------------|
-| [Architecture](documentation/architecture.md) | Internal design, storage format, concurrency model |
-| [Rust API](documentation/rust-api.md) | Complete Rust API reference |
-| [Node.js API](documentation/nodejs-api.md) | Complete Node.js API reference |
-| [Filter DSL](documentation/filter-dsl.md) | Metadata filtering with MongoDB-like syntax |
-
-## API Overview
-
-### Database Operations
-
-```rust
-let db = Database::open("./data")?;
-let coll = db.create_collection("embeddings", CollectionConfig::new(768))?;
-let names = db.list_collections();
-db.drop_collection("old_data")?;
-```
-
-### Document Operations
-
-```rust
-// Insert
-coll.insert(Document {
-    id: "doc1".to_string(),
-    vector: vec![0.1; 768],
-    payload: Some(json!({"title": "Example"})),
-})?;
-
-// Batch insert
-coll.insert_batch(docs)?;
-
-// Get
-let doc = coll.get("doc1")?;
-
-// Delete (soft delete)
-coll.delete("doc1")?;
-
-// Flush memtable to segment
-coll.flush()?;
-```
-
-### Search
-
-```rust
-use nvdb::{Search, Distance, Filter};
-
-// Exact search (100% recall)
-let results = coll.search(Search::new(&query).top_k(10))?;
-
-// Approximate search with HNSW
-let results = coll.search(
-    Search::new(&query)
-        .top_k(10)
-        .approximate(true)
-        .ef(128)
-)?;
-
-// Filtered search
-let results = coll.search(
-    Search::new(&query)
-        .top_k(10)
-        .filter(Filter::and([
-            Filter::eq("category", "tutorial"),
-            Filter::gte("year", 2023),
-        ]))
-)?;
-```
-
-### Index Management
-
-```rust
-// Build HNSW index
-coll.rebuild_index(None, None)?;
-
-// Build with custom parameters
-coll.rebuild_index(
-    Some(HnswParams::with_m(32)),
-    Some(Distance::Cosine),
-)?;
-
-// Compact segments + rebuild index
-coll.compact()?;
-
-// Remove index
-coll.delete_index()?;
-```
-
-## Architecture
-
-nVDB uses an **LSM-Lite** architecture:
-
-```
-┌─────────────────────────────────────────────┐
-│  Memtable (HashMap + SoA)    ← Read+Write  │
-├─────────────────────────────────────────────┤
-│  Segments (mmap, immutable)  ← Read-only   │
-├─────────────────────────────────────────────┤
-│  WAL (append-only)           ← Crash safe  │
-├─────────────────────────────────────────────┤
-│  HNSW Index (CSR graph)      ← On-demand   │
-└─────────────────────────────────────────────┘
-```
-
-- **Writes** go to WAL + memtable
-- **Reads** check memtable first, then segments
-- **Flush** freezes memtable → new segment
-- **Compaction** merges segments, removes deleted docs
-
-## Performance
-
-| Dataset Size | Exact Search | Approximate (HNSW) |
-|--------------|--------------|-------------------|
-| 10K docs | <1ms | <1ms |
-| 100K docs | 5-10ms | 1-2ms |
-| 1M docs | 50-100ms | 2-5ms |
-| 10M docs | 500ms-1s | 5-10ms |
-
-*Benchmarks with 768-dimensional vectors, cosine similarity, single thread.*
-
-## Distance Metrics
-
-| Metric | Score Direction | Best For |
-|--------|----------------|----------|
-| **Cosine** (default) | Higher = more similar | Normalized embeddings |
-| **Dot Product** | Higher = more similar | Pre-normalized vectors |
-| **Euclidean** | Lower = more similar | Spatial data |
-
-All metrics use SIMD acceleration (AVX2/AVX-512/NEON).
-
-## Build & Test
-
-```bash
-# Build
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run benchmarks
-cargo bench
-
-# Generate documentation
-cargo doc --open
-```
-
-## Examples
-
-```bash
-cargo run --example basic_usage
-cargo run --example rag_system
-cargo run --example web_service
-```
-
-## When to Use nVDB
-
-- Storing embeddings from LLMs (768-1536 dimensions)
-- Similarity search with optional metadata filtering
-- Read-heavy workloads with occasional bulk writes
-- Single-node deployments where embedded databases are appropriate
-- Electron and Node.js applications needing local vector search
-
-## When NOT to Use nVDB
-
-- Client-server architecture (use Qdrant, Milvus, etc.)
-- Distributed/multi-node requirements
-- Multiple independent applications writing to the same data
-- Complex multi-document transactions
+|---|---|
+| [v2 engine & HTTP API](documentation/v2-server.md) | Collection layout, retrieval pipeline, fusion, reranking, sync contract |
+| [Architecture](documentation/architecture.md) | v1 crate internals: LSM-Lite storage, segments, WAL, HNSW |
+| [Rust API](documentation/rust-api.md) | v1 crate API reference |
+| [Filter DSL](documentation/filter-dsl.md) | v1 payload filter DSL |
 
 ## License
 

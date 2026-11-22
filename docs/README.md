@@ -1,18 +1,17 @@
 # nVDB Documentation
 
+> **Current engine:** the v2 hybrid retrieval engine served by `nvdb serve`. Its reference lives in [`../documentation/v2-server.md`](../documentation/v2-server.md). Almost everything in this folder describes the v1 crate, which is still compiled and tested but is not the production path.
+
 Welcome to the nVDB documentation. This directory contains comprehensive guides for using and integrating nVDB.
 
 ## Quick Start
 
 New to nVDB? Start here:
 
-1. **[User Guide](user-guide.md)** - Complete API reference and usage examples
-2. **[Integration Guide](integration-guide.md)** - Production integration patterns
-3. **[Integrations](./integrations/)** - Language/environment specific guides
-   - [N-API (Node.js native)](./integrations/napi.md) - Maximum performance for Node.js
-   - [WebAssembly](./integrations/wasm.md) - Browser and Edge compatibility
-   - [gRPC](./integrations/grpc.md) - Multi-language and distributed systems
-4. **[Examples](../examples/)** - Working code examples
+1. **[v2 engine & HTTP service](../documentation/v2-server.md)** - The current engine (start here)
+2. **[User Guide](user-guide.md)** - v1 crate API reference and usage examples
+3. **[Integration Guide](integration-guide.md)** - v1 integration patterns
+4. **[Examples](../examples/)** - v1 code examples
 
 ## Documentation Index
 
@@ -20,26 +19,26 @@ New to nVDB? Start here:
 
 | Document | Description |
 |----------|-------------|
-| [User Guide](user-guide.md) | Complete API reference, configuration, best practices |
-| [Integration Guide](integration-guide.md) | Integration patterns, platform setup, deployment |
-| [Integrations](./integrations/) | Language-specific integration guides (Node.js, WASM, gRPC) |
-| [Test Documentation](test-documentation.md) | Test suite documentation |
+| [User Guide](user-guide.md) | v1 API reference, configuration, best practices |
+| [Integration Guide](integration-guide.md) | v1 integration patterns, platform setup, deployment |
+| [Test Documentation](test-documentation.md) | Test suite documentation (largely v1-era) |
 
 ### Architecture & Design
 
 | Document | Description |
 |----------|-------------|
 | [Scope and Boundaries](scope-and-boundaries.md) | What nVDB is and isn't (no embedding generation) |
-| [ADR 001: LSM-Lite Storage](adr/001-lsm-lite-storage.md) | Storage architecture decisions |
-| [ADR 002: HNSW Index](adr/002-hnsw-index.md) | Approximate search design |
+| [ADR 001: LSM-Lite Storage](adr/001-lsm-lite-storage.md) | v1 storage architecture decisions |
+| [ADR 002: HNSW Index](adr/002-hnsw-index.md) | v1 approximate search design |
 | [ADR 003: SIMD Distance](adr/003-simd-distance.md) | SIMD computation choices |
 
-### Development
+### Historical
 
 | Document | Description |
 |----------|-------------|
-| [Development Plan](development-plan.md) | Development phases and roadmap |
-| [Handover Phase 5→6](handover-phase5-to-phase6.md) | Phase 5 completion notes |
+| [Development Plan](archive/development-plan.md) | v1 development phases and roadmap |
+| [Phase handovers](archive/) | v1 completion notes |
+| [Integrations](./integrations/) | v1-era language guides (Node.js/N-API, WASM, gRPC) — none is a current production path |
 
 ## Common Tasks
 

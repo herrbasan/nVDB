@@ -1,5 +1,7 @@
 # nVDB Node.js API Reference
 
+> **STATUS: legacy, not maintained.** This documents the `napi/` addon for the v1 crate. The `napi/` folder still exists on disk as a workspace member, but it has no v2 surface, is not part of any production path, and is not the way nVDB is used today. The current engine is the `nvdb serve` HTTP service — see [v2-server.md](./v2-server.md).
+>
 > Complete API documentation for the `nvdb` Node.js native addon.
 
 ---

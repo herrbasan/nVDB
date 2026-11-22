@@ -1,5 +1,7 @@
 # nVDB Architecture
 
+> **Scope: the v1 crate.** `Database`/`Collection`, LSM-Lite storage, segments, WAL and HNSW still exist and are tested, but production retrieval runs on the v2 engine (`src/v2/`) served by `nvdb serve`. See [v2-server.md](./v2-server.md) for the current design.
+>
 > Internal design and data flow of the nVDB vector database.
 
 ---
