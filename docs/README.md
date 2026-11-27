@@ -45,12 +45,12 @@ New to nVDB? Start here:
 
 ```toml
 [dependencies]
-nVDB = "0.1"
+nvdb = "0.1"
 serde_json = "1.0"
 ```
 
 ```rust
-use nVDB::{Database, CollectionConfig, Document, Search};
+use nvdb::{Database, CollectionConfig, Document, Search};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open("./data")?;
@@ -65,15 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Running Examples
 
 ```bash
-# Basic usage example
+# Basic usage example (v1 API)
 cargo run --example basic_usage
 
-# RAG system example
+# RAG system example (v1 API)
 cargo run --example rag_system
-
-# Web service example (requires additional dependencies)
-cargo run --example web_service
 ```
+
+The v2 HTTP service is built in (`nvdb serve`), not an example.
 
 ### Running Tests
 

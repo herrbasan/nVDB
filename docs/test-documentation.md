@@ -127,8 +127,8 @@ tests pin the interned group-set encoding round trip.
 ## Phase 2 (General Indexer): HTTP Surface (`tests/phase2_v2_server_tests.rs`)
 
 `nvdb serve` (`src/v2/server.rs`) is the resident localhost front end of the v2
-engine — hand-rolled HTTP/1.1 on `std::net` (no new crate), one thread per
-connection behind a cap, JSON in and out. The suite binds the server to
+engine — shared `nhttp` transport (bare `tokio` + `hyper` 1.x, a 1024-connection
+cap, engine work on `spawn_blocking`), JSON in and out. The suite binds the server to
 `127.0.0.1:0`, talks to it over a real TCP socket, and asserts on the raw status
 line and JSON body, so the route table, the error codes and the fail-closed ACL
 path are tested exactly as a client sees them. It also covers the Phase-4

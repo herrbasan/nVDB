@@ -24,10 +24,10 @@ Start the service. Each collection is a direct subdirectory of `--dir`; every di
 
 ```bash
 ./target/release/nvdb serve --dir ./nvdb-data --host 127.0.0.1 --port 3510 \
-  --reranker-model ./models/bge-reranker
+  --reranker-model ./models/bge-reranker --logs-dir ./logs
 ```
 
-`--host` defaults to `127.0.0.1`, `--port` to `3510`. Pass `--host 0.0.0.0` for LAN access. `--reranker-model` expects a directory holding `model.onnx` and `tokenizer.json`; it is only available in a `rerank-onnx` build, and a model that fails to load aborts startup. Without the flag, `/level2` answers `503 reranker_not_configured` — it never silently degrades to Level-1 ordering.
+`--host` defaults to `127.0.0.1`, `--port` to `3510`. Pass `--host 0.0.0.0` for LAN access. `--token <secret>` turns on bearer auth (every route except `/health` and `/metrics`); without it the server stays open. `--logs-dir <path>` (default `./logs`) receives the `nlogger` JSONL stream. `--reranker-model` expects a directory holding `model.onnx` and `tokenizer.json`; it is only available in a `rerank-onnx` build, and a model that fails to load aborts startup. Without the flag, `/level2` answers `503 reranker_not_configured` — it never silently degrades to Level-1 ordering.
 
 Create a collection, index a document, query it:
 
@@ -136,7 +136,7 @@ All routes are JSON. Writes accept `commit` (default `true`) except `attach_vect
 
 Errors are `{"error": "...", "code": "..."}`. Notable codes: `400` malformed body, `MissingPrincipals`, `WrongDimension`, `vector_lane_not_configured`, `invalid_watermark`; `403` a non-v2 directory the server refuses to take over; `404` unknown route or collection; `409` schema/config conflict or `stale_vector_cas`; `500` IO/corruption/`rerank_failed`; `503` `index_degraded` or `reranker_not_configured`. Collection names match `[a-zA-Z0-9._-]+`, and `.`/`..` are rejected, so a name cannot escape the collection root.
 
-The server is hand-rolled HTTP/1.1 on `std::net`: one thread per connection behind a 64-connection cap, keep-alive, 30 s I/O timeouts, 64 MB request-body cap (`413` above it).
+The server runs on the shared `nhttp` transport (bare `tokio` + `hyper` 1.x): a 1024 concurrent-connection cap (`503` above it — a connection is a task, not a thread), 30 s read/idle/write timeouts, keep-alive, a 64 MB request-body cap (`413` above it), and a graceful drain. The engine stays 100% synchronous — every Tantivy, dense-lane and ONNX call runs on `nhttp::spawn_blocking`. `GET /metrics` serves the transport's built-in counter snapshot, and `nlogger` writes structured JSONL to `--logs-dir` (default `./logs`): one `nvdb-<session>.log` plus the rotated `main-N.log` stream.
 
 ## CLI
 
