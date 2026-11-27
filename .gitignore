@@ -25,6 +25,12 @@ Thumbs.db
 # Live `nvdb serve` database (never tracked)
 /data/
 
+# Local cargo source patches (points at sibling checkouts)
+/.cargo/config.toml
+
+# `nvdb serve` structured logs (nlogger)
+/logs/
+
 # rustup-init.exe (downloaded tool)
 rustup-init.exe
 

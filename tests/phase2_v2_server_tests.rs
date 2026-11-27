@@ -16,7 +16,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nvdb::v2::server::{start_in_background, start_in_background_with_reranker};
+use nvdb::v2::server::{
+    start_in_background, start_in_background_with_reranker, start_in_background_with_token,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -957,6 +959,82 @@ fn level2_reranks_filters_revoked_documents_and_enforces_the_floor() {
     );
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["rejected"], json!(true), "{body}");
+
+    server.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Bearer auth
+// ---------------------------------------------------------------------------
+
+/// One round trip with an explicit `Authorization` header (`None` sends none).
+fn call_authorized(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> (u16, Value) {
+    let mut stream = TcpStream::connect(addr).expect("connect to serve");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout");
+    let auth = match token {
+        Some(token) => format!("Authorization: Bearer {token}\r\n"),
+        None => String::new(),
+    };
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("write request head");
+    stream.flush().expect("flush request");
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read response");
+    let text = String::from_utf8(raw).expect("response is UTF-8");
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .expect("response has a header separator");
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .expect("status line");
+    let value = if body.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(body).expect("response body is JSON")
+    };
+    (status, value)
+}
+
+#[test]
+fn bearer_token_guards_routes_but_leaves_health_and_metrics_open() {
+    let temp = TempDir::new().expect("temp dir");
+    let mut server = start_in_background_with_token(temp.path(), "127.0.0.1:0", "s3cret")
+        .expect("start server");
+    let addr = server.addr();
+
+    let (status, body) = call_authorized(addr, "GET", "/v2/collections", None);
+    assert_eq!(status, 401, "{body}");
+    // The gate is nhttp's, before routing: its transport envelope, not nVDB's.
+    assert_eq!(body["error"], json!("unauthorized"), "{body}");
+
+    let (status, body) = call_authorized(addr, "GET", "/v2/collections", Some("wrong"));
+    assert_eq!(status, 401, "{body}");
+
+    // Authenticated request reaches the route (which then rejects the empty body
+    // with its own 400) - proof the gate opened rather than masking a 404.
+    let (status, body) = call_authorized(addr, "POST", "/v2/collections", Some("s3cret"));
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], json!("empty_body"), "{body}");
+
+    let (status, body) = call_authorized(addr, "GET", "/health", None);
+    assert_eq!(status, 200, "health stays exempt: {body}");
+    assert_eq!(body["ok"], json!(true), "{body}");
+
+    let (status, _) = call_authorized(addr, "GET", "/metrics", None);
+    assert_eq!(status, 200, "metrics stays exempt");
 
     server.shutdown();
 }

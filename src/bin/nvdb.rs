@@ -69,6 +69,9 @@ fn print_usage() {
         "  --reranker-model <dir>  Level-2 reranker: <dir>/model.onnx + <dir>/tokenizer.json"
     );
     eprintln!("                          (requires a build with --features rerank-onnx)");
+    eprintln!("  --logs-dir <path>       nlogger JSONL output (default ./logs)");
+    eprintln!("  --token <secret>        Require Authorization: Bearer <secret> (default: open)");
+    eprintln!("Metrics: GET /metrics (nhttp transport counters)");
 }
 
 fn handle_init(args: &[String]) {
@@ -853,7 +856,7 @@ fn option_value(args: &[String], index: usize, flag: &str, usage: &str) -> Strin
 }
 
 fn handle_serve(args: &[String]) {
-    let usage = "Usage: nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510] [--reranker-model <dir>]";
+    let usage = "Usage: nvdb serve --dir <path> [--host 127.0.0.1] [--port 3510] [--reranker-model <dir>] [--logs-dir ./logs] [--token <secret>]";
     if args.is_empty() {
         eprintln!("{}", usage);
         process::exit(EXIT_GENERAL_ERROR);
@@ -863,6 +866,8 @@ fn handle_serve(args: &[String]) {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 3510;
     let mut reranker_model: Option<String> = None;
+    let mut logs_dir = "./logs".to_string();
+    let mut token: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -891,6 +896,19 @@ fn handle_serve(args: &[String]) {
                 reranker_model = Some(option_value(args, i, flag, usage));
                 i += 2;
             }
+            "--logs-dir" => {
+                logs_dir = option_value(args, i, flag, usage);
+                i += 2;
+            }
+            "--token" => {
+                let raw = option_value(args, i, flag, usage);
+                if raw.is_empty() {
+                    eprintln!("Error: --token must not be empty");
+                    process::exit(EXIT_GENERAL_ERROR);
+                }
+                token = Some(raw);
+                i += 2;
+            }
             other => {
                 eprintln!("Error: unknown serve option: {}", other);
                 eprintln!("{}", usage);
@@ -907,13 +925,21 @@ fn handle_serve(args: &[String]) {
 
     let addr = format!("{}:{}", host, port);
     let root = Path::new(&dir);
-    let result = match reranker_model.as_deref() {
-        None => nvdb::v2::server::serve_blocking(root, &addr),
-        Some(model_dir) => {
-            let reranker = load_reranker(model_dir);
-            nvdb::v2::server::serve_blocking_with_reranker(root, &addr, reranker)
+    let logger = match nvdb::v2::server::build_logger(Path::new(&logs_dir)) {
+        Ok(logger) => logger,
+        Err(error) => {
+            eprintln!("Error: cannot start the logger in '{}': {}", logs_dir, error);
+            process::exit(EXIT_GENERAL_ERROR);
         }
     };
+    let reranker = reranker_model.as_deref().map(load_reranker);
+    let result = nvdb::v2::server::serve_blocking_configured(
+        root,
+        &addr,
+        reranker,
+        Some(logger),
+        token,
+    );
     if let Err(e) = result {
         eprintln!("Server error: {}", e);
         process::exit(EXIT_GENERAL_ERROR);

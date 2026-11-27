@@ -29,6 +29,9 @@ byteorder = "1.5"
 bincode = "1.3"
 fastrand = "2.0"
 tantivy = "0.22"
+nhttp = { git = "https://github.com/herrbasan/nHttp", tag = "v0.1.0" }
+nlogger = { git = "https://github.com/herrbasan/nLogger", tag = "v0.1.0", features = ["serde_json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

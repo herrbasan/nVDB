@@ -1,9 +1,15 @@
 //! `nvdb serve` — the resident HTTP/1.1 front end of the v2 lexical engine.
 //!
-//! Hand-rolled on `std::net`, the same shape as `nDB`'s daemon: one thread per
-//! connection behind a cap, keep-alive, read/write timeouts and a body cap. The
-//! process owns the [`V2Index`] handles; clients only send documents and
-//! queries and receive results — a client cannot reach the filesystem.
+//! The transport is [`nhttp`] (tokio + hyper): one router, connection and body
+//! caps, idle/read/write timeouts, a bounded blocking pool and a graceful
+//! drain. Every engine call — Tantivy, the dense lane, the ONNX reranker — is
+//! synchronous Rust and runs on [`nhttp::spawn_blocking`], so a reactor thread
+//! never stalls behind an index lock. The process owns the [`V2Index`] handles;
+//! clients only send documents and queries and receive results — a client
+//! cannot reach the filesystem.
+//!
+//! `GET /metrics` is nhttp's built-in counter snapshot; everything below is an
+//! nVDB route.
 //!
 //! # Routes
 //!
@@ -31,7 +37,10 @@
 //!
 //! # Failures
 //!
-//! Every non-2xx answer carries `{"error": "...", "code": "..."}`:
+//! Every non-2xx answer of an nVDB route carries `{"error": "...", "code": "..."}`.
+//! Rejections made by the transport itself — bearer-token auth (`401`), the body
+//! cap (`413`) and the connection cap (`503`) — carry nhttp's own envelope and
+//! happen before any route runs.
 //!
 //! | Status | Meaning |
 //! |---|---|
@@ -47,15 +56,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use parking_lot::{Condvar, Mutex, RwLock};
+use nhttp::{Method, Request, Response, Router, ServerConfig, StatusCode};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -73,7 +81,12 @@ use crate::v2::{
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
 /// Concurrent connection cap. Excess connections are answered with `503`.
-const MAX_CONNECTIONS: usize = 64;
+///
+/// The hand-rolled front end capped this at 64 because every connection owned a
+/// thread. Under nhttp a connection is a task, so the cap is the transport's
+/// default: high enough not to throttle concurrent clients, still bounded so a
+/// flood is refused rather than swallowing the process.
+const MAX_CONNECTIONS: usize = 1024;
 
 /// Idle read/write timeout, so a silent client cannot pin a thread forever.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -81,21 +94,33 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default page size of `pending_embeddings`.
 const DEFAULT_PENDING_LIMIT: usize = 100;
 
+/// Deepest path the catch-all 404 routes claim. nVDB's own routes stop at four
+/// segments, so this leaves headroom without registering an unbounded table.
+const CATCH_ALL_SEGMENTS: usize = 8;
+
+/// Subsystem tag every nVDB log line carries.
+const SUBSYSTEM: &str = "serve";
+
 // ─── Shared state ───────────────────────────────────────────────────
 
 /// The open engine state behind the HTTP surface.
 ///
 /// Each collection is its own lock, so a search never waits for an unrelated
-/// collection's write.
+/// collection's write. Everything here is synchronous: the async layer only
+/// hands work over through [`nhttp::spawn_blocking`].
 pub struct V2Server {
     root_dir: PathBuf,
     collections: RwLock<HashMap<String, Arc<RwLock<V2Index>>>>,
     /// Optional Level-2 reranker. `None` makes `/level2` answer `503`: a server
     /// without a model must not silently degrade into Level-1 ordering.
     reranker: Option<Arc<dyn Reranker>>,
-    running: AtomicBool,
-    active: Mutex<usize>,
-    drained: Condvar,
+    /// nhttp's live counters, installed at bind time. The catch-all route claims
+    /// every path shape — including `/metrics` — so nVDB answers `/metrics` from
+    /// this handle rather than leaving the path to nhttp's own fallback.
+    metrics: OnceLock<Arc<nhttp::Metrics>>,
+    /// The process logger, installed at bind time. `None` in library/test
+    /// instances, so nothing writes into `./logs` unless the caller asked.
+    logger: OnceLock<nlogger::Logger>,
 }
 
 impl V2Server {
@@ -129,10 +154,48 @@ impl V2Server {
             root_dir: root_dir.to_path_buf(),
             collections: RwLock::new(collections),
             reranker,
-            running: AtomicBool::new(true),
-            active: Mutex::new(0),
-            drained: Condvar::new(),
+            metrics: OnceLock::new(),
+            logger: OnceLock::new(),
         })
+    }
+
+    /// Hand the bound server's counters to the `/metrics` route.
+    fn install_metrics(&self, metrics: Arc<nhttp::Metrics>) {
+        self.metrics
+            .set(metrics)
+            .expect("the metrics handle is installed once, at bind time");
+    }
+
+    fn metrics_snapshot(&self) -> nhttp::MetricsSnapshot {
+        self.metrics
+            .get()
+            .expect("bind installs the metrics handle before the socket serves")
+            .snapshot()
+    }
+
+    /// Hand the process logger to the failure path. No logger, no log lines.
+    fn install_logger(&self, logger: Option<&nlogger::Logger>) {
+        if let Some(logger) = logger {
+            let _ = self.logger.set(logger.clone());
+        }
+    }
+
+    /// A failed request is an operational signal, not noise: only 5xx is
+    /// recorded, and it carries enough detail to find the failing route.
+    fn log_failure(&self, error: &ApiError) {
+        let Some(logger) = self.logger.get() else {
+            return;
+        };
+        if error.status < 500 {
+            return;
+        }
+        logger.error_meta(
+            SUBSYSTEM,
+            &format!("{}: {}", error.code, error.message),
+            nlogger::Meta::new()
+                .field("status", i64::from(error.status))
+                .field("code", error.code),
+        );
     }
 
     /// Open `root_dir` with a Level-2 reranker attached.
@@ -175,8 +238,8 @@ fn open_collection_dir(name: &str, dir: &Path) -> Result<V2Index, V2Error> {
 /// or an open index writer by returning early.
 pub struct V2ServerHandle {
     addr: SocketAddr,
-    server: Option<Arc<V2Server>>,
-    accept: Option<JoinHandle<()>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl V2ServerHandle {
@@ -185,35 +248,21 @@ impl V2ServerHandle {
         self.addr
     }
 
-    /// Stop accepting, wait for in-flight requests, and release every index.
+    /// Stop accepting, drain in-flight requests, and release every index.
     ///
     /// Releasing matters: a Tantivy writer lock is held until the last
     /// [`V2Index`] is dropped, so a restarted server on the same directory
-    /// would land on a stale lock otherwise. Idempotent.
+    /// would land on a stale lock otherwise. The join waits for the serving
+    /// thread to drop its runtime *and* its state, so the lock is gone by the
+    /// time this returns. Idempotent.
     pub fn shutdown(&mut self) {
-        let Some(server) = self.server.take() else {
-            return;
-        };
-        server.running.store(false, Ordering::SeqCst);
-        // A blocking accept() only returns when a connection arrives; this one
-        // is dropped unread because the running flag is already false.
-        let wake = if self.addr.ip().is_unspecified() {
-            SocketAddr::from(([127, 0, 0, 1], self.addr.port()))
-        } else {
-            self.addr
-        };
-        if let Ok(stream) = TcpStream::connect(wake) {
-            drop(stream);
-        } else {
-            // Unreachable while the listener is alive (bound port, backlog far
-            // above the connection cap). Reported instead of swallowed: the
-            // accept thread would otherwise stay blocked and the join below
-            // would hang forever.
-            eprintln!("nvdb serve: shutdown could not wake the accept loop on {wake}");
-            return;
+        if let Some(signal) = self.shutdown.take() {
+            let _ = signal.send(());
         }
-        if let Some(accept) = self.accept.take() {
-            let _ = accept.join();
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                eprintln!("nvdb serve: the serving thread panicked during shutdown");
+            }
         }
     }
 }
@@ -226,13 +275,14 @@ impl Drop for V2ServerHandle {
 
 /// Open `root_dir`, bind `addr`, and serve on a background thread.
 ///
-/// `addr` is anything [`TcpListener::bind`] accepts; `"127.0.0.1:0"` picks a
-/// free port and [`V2ServerHandle::addr`] reports the one chosen.
+/// `addr` is a `host:port` pair; `"127.0.0.1:0"` picks a free port and
+/// [`V2ServerHandle::addr`] reports the one chosen. No logger is attached, so a
+/// test instance never writes into `./logs`.
 pub fn start_in_background(
     root_dir: impl AsRef<Path>,
     addr: &str,
 ) -> Result<V2ServerHandle, V2Error> {
-    start(root_dir.as_ref(), addr, None)
+    start(root_dir.as_ref(), addr, None, None, None)
 }
 
 /// Like [`start_in_background`], with a Level-2 reranker attached.
@@ -241,40 +291,58 @@ pub fn start_in_background_with_reranker(
     addr: &str,
     reranker: Arc<dyn Reranker>,
 ) -> Result<V2ServerHandle, V2Error> {
-    start(root_dir.as_ref(), addr, Some(reranker))
+    start(root_dir.as_ref(), addr, Some(reranker), None, None)
+}
+
+/// Like [`start_in_background`], guarded by a bearer token.
+pub fn start_in_background_with_token(
+    root_dir: impl AsRef<Path>,
+    addr: &str,
+    token: impl Into<String>,
+) -> Result<V2ServerHandle, V2Error> {
+    start(root_dir.as_ref(), addr, None, None, Some(token.into()))
 }
 
 fn start(
     root_dir: &Path,
     addr: &str,
     reranker: Option<Arc<dyn Reranker>>,
+    logger: Option<nlogger::Logger>,
+    token: Option<String>,
 ) -> Result<V2ServerHandle, V2Error> {
     let server = Arc::new(V2Server::open(root_dir, reranker)?);
-    let listener = bind(addr)?;
-    let local_addr = listener.local_addr()?;
-    eprintln!(
-        "nvdb serve listening on http://{local_addr}/ ({} collections, reranker: {})",
-        server.collections.read().len(),
-        if server.reranker.is_some() {
-            "loaded"
-        } else {
-            "none"
-        }
-    );
-    let accept_server = Arc::clone(&server);
-    let accept = std::thread::Builder::new()
-        .name("nvdb-serve-accept".to_string())
-        .spawn(move || accept_loop(&listener, &accept_server))?;
+    let bound = bind(Arc::clone(&server), addr, logger.clone(), token)?;
+    let local_addr = bound.local_addr();
+
+    // Built here, not on the serving thread: a runtime that cannot start is a
+    // startup failure, not a server that silently answers nothing.
+    let runtime = build_runtime()?;
+    let (shutdown, signal) = tokio::sync::oneshot::channel();
+    let thread = std::thread::Builder::new()
+        .name("nvdb-serve".to_string())
+        .spawn(move || {
+            // A dropped sender means the handle went away without shutdown();
+            // treating that as a stop is what keeps Drop honest.
+            let outcome = runtime.block_on(bound.serve_until(async move {
+                let _ = signal.await;
+            }));
+            if let Err(error) = outcome {
+                eprintln!("nvdb serve: {error}");
+            }
+        })?;
+    // Announced only once the serving thread exists: a listener that reported
+    // readiness and then failed to start would be a lie the client acts on.
+    announce(&server, local_addr, logger.as_ref());
     Ok(V2ServerHandle {
         addr: local_addr,
-        server: Some(server),
-        accept: Some(accept),
+        shutdown: Some(shutdown),
+        thread: Some(thread),
     })
 }
 
-/// Open `root_dir` and serve on `addr` until the listener fails. Blocks.
+/// Open `root_dir` and serve on `addr` until SIGINT. Blocks.
 pub fn serve_blocking(root_dir: impl AsRef<Path>, addr: &str) -> Result<(), V2Error> {
-    serve(root_dir.as_ref(), addr, None)
+    serve_blocking_configured(root_dir.as_ref(), addr, None, None, None)
 }
 
 /// Like [`serve_blocking`], with a Level-2 reranker attached.
@@ -283,15 +351,134 @@ pub fn serve_blocking_with_reranker(
     addr: &str,
     reranker: Arc<dyn Reranker>,
 ) -> Result<(), V2Error> {
-    serve(root_dir.as_ref(), addr, Some(reranker))
+    serve_blocking_configured(root_dir.as_ref(), addr, Some(reranker), None, None)
 }
 
-fn serve(root_dir: &Path, addr: &str, reranker: Option<Arc<dyn Reranker>>) -> Result<(), V2Error> {
-    let server = Arc::new(V2Server::open(root_dir, reranker)?);
-    let listener = bind(addr)?;
-    eprintln!(
-        "nvdb serve listening on http://{}/ ({} collections, reranker: {})",
-        listener.local_addr()?,
+/// The full CLI path: open `root_dir`, attach a reranker and a logger when the
+/// caller has one, and serve until SIGINT.
+///
+/// `token` switches on bearer auth: every request except `/health` and
+/// `/metrics` then needs `Authorization: Bearer <token>`. `None` keeps the
+/// historical open server.
+pub fn serve_blocking_configured(
+    root_dir: impl AsRef<Path>,
+    addr: &str,
+    reranker: Option<Arc<dyn Reranker>>,
+    logger: Option<nlogger::Logger>,
+    token: Option<String>,
+) -> Result<(), V2Error> {
+    let server = Arc::new(V2Server::open(root_dir.as_ref(), reranker)?);
+    let bound = bind(Arc::clone(&server), addr, logger.clone(), token)?;
+    announce(&server, bound.local_addr(), logger.as_ref());
+    let runtime = build_runtime()?;
+    let outcome = runtime.block_on(bound.serve());
+    if let Some(logger) = logger.as_ref() {
+        logger.info(SUBSYSTEM, "nvdb serve stopped");
+    }
+    outcome.map_err(|error| serve_error(addr, error))
+}
+
+/// Build the `nvdb` logger writing JSONL into `logs_dir`.
+///
+/// `LOG_LEVEL` and `LOG_RETENTION_DAYS` are honoured through
+/// [`nlogger::Config::with_env_overrides`].
+pub fn build_logger(logs_dir: &Path) -> Result<nlogger::Logger, V2Error> {
+    let config = nlogger::Config::new("nvdb", logs_dir)
+        .with_env_overrides()
+        .map_err(|error| V2Error::InvalidConfig(format!("logger: {error}")))?;
+    nlogger::Logger::new(config).map_err(|error| V2Error::InvalidConfig(format!("logger: {error}")))
+}
+
+fn build_runtime() -> Result<tokio::runtime::Runtime, V2Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("nvdb-serve-worker")
+        .build()
+        .map_err(|error| {
+            V2Error::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("build the serve runtime: {error}"),
+            ))
+        })
+}
+
+fn bind(
+    server: Arc<V2Server>,
+    addr: &str,
+    logger: Option<nlogger::Logger>,
+    token: Option<String>,
+) -> Result<nhttp::BoundServer<Arc<V2Server>>, V2Error> {
+    let (bind, port) = split_addr(addr)?;
+    // Monitoring stays reachable when auth is on: a probe that must hold the
+    // secret cannot tell "down" from "unauthorized".
+    let auth_exempt_paths = match token {
+        Some(_) => vec!["/health".to_string(), "/metrics".to_string()],
+        None => Vec::new(),
+    };
+    let failure_logger = logger.clone();
+    let config = ServerConfig {
+        bind,
+        port,
+        token,
+        auth_exempt_paths,
+        max_connections: MAX_CONNECTIONS,
+        max_body_bytes: MAX_BODY,
+        read_timeout: IO_TIMEOUT,
+        idle_timeout: IO_TIMEOUT,
+        write_timeout: IO_TIMEOUT,
+        // Long enough for a real upsert batch to finish, bounded so a wedged
+        // handler cannot keep the process alive forever.
+        shutdown_drain_timeout: Duration::from_secs(30),
+        logger,
+        // `/health` is nVDB's own route: it reports collections and the
+        // reranker, which nhttp's built-in liveness line cannot. `/metrics` is
+        // answered by the catch-all from this server's own counter handle, so
+        // nhttp's fallback would never be reached.
+        built_in_health: false,
+        built_in_metrics: false,
+    };
+    nhttp::Server::bind(config, router(), Arc::clone(&server))
+        .map(|bound| {
+            server.install_logger(failure_logger.as_ref());
+            server.install_metrics(bound.metrics());
+            bound
+        })
+        .map_err(|error| serve_error(addr, error))
+}
+
+/// `host:port` → the pair nhttp binds. IPv6 literals keep their brackets off.
+fn split_addr(addr: &str) -> Result<(String, u16), V2Error> {
+    let invalid = || {
+        V2Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{addr}' is not a host:port address"),
+        ))
+    };
+    let (host, port) = if let Some(rest) = addr.strip_prefix('[') {
+        rest.split_once("]:")
+            .map(|(host, port)| (host.to_string(), port))
+            .ok_or_else(invalid)?
+    } else {
+        addr.rsplit_once(':')
+            .map(|(host, port)| (host.to_string(), port))
+            .ok_or_else(invalid)?
+    };
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| V2Error::InvalidConfig(format!("'{addr}': invalid port: {error}")))?;
+    Ok((host, port))
+}
+
+fn serve_error(addr: &str, error: nhttp::ServerError) -> V2Error {
+    V2Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("serve {addr}: {error}"),
+    ))
+}
+
+fn announce(server: &V2Server, addr: SocketAddr, logger: Option<&nlogger::Logger>) {
+    let message = format!(
+        "nvdb serve listening on http://{addr}/ ({} collections, reranker: {})",
         server.collections.read().len(),
         if server.reranker.is_some() {
             "loaded"
@@ -299,297 +486,222 @@ fn serve(root_dir: &Path, addr: &str, reranker: Option<Arc<dyn Reranker>>) -> Re
             "none"
         }
     );
-    accept_loop(&listener, &server);
-    Ok(())
-}
-
-fn bind(addr: &str) -> Result<TcpListener, V2Error> {
-    TcpListener::bind(addr).map_err(|error| {
-        V2Error::Io(std::io::Error::new(
-            error.kind(),
-            format!("bind {addr}: {error}"),
-        ))
-    })
-}
-
-// ─── Accept loop ────────────────────────────────────────────────────
-
-fn accept_loop(listener: &TcpListener, server: &Arc<V2Server>) {
-    for stream in listener.incoming() {
-        if !server.running.load(Ordering::SeqCst) {
-            break;
-        }
-        let stream = match stream {
-            Ok(stream) => stream,
-            Err(error) => {
-                eprintln!("nvdb serve: accept error: {error}");
-                continue;
-            }
-        };
-        {
-            let mut active = server.active.lock();
-            if *active >= MAX_CONNECTIONS {
-                drop(active);
-                let mut stream = stream;
-                let mut response =
-                    Response::error(503, "connection_cap", "connection cap exceeded");
-                // The client is refused either way; a failed notice to one that
-                // already vanished changes nothing.
-                let _ = response.write(&mut stream, false);
-                continue;
-            }
-            *active += 1;
-        }
-        let handler_server = Arc::clone(server);
-        std::thread::spawn(move || {
-            handle_connection(stream, &handler_server);
-            let mut active = handler_server.active.lock();
-            *active -= 1;
-            if *active == 0 {
-                handler_server.drained.notify_all();
-            }
-        });
-    }
-    // In-flight handlers still hold index locks; shutdown() must not return
-    // before they drop them.
-    let mut active = server.active.lock();
-    while *active > 0 {
-        server.drained.wait(&mut active);
+    match logger {
+        Some(logger) => logger.info(SUBSYSTEM, &message),
+        None => eprintln!("{message}"),
     }
 }
 
-fn handle_connection(stream: TcpStream, server: &Arc<V2Server>) {
-    if stream.set_read_timeout(Some(IO_TIMEOUT)).is_err() {
-        return;
-    }
-    if let Err(error) = stream.set_write_timeout(Some(IO_TIMEOUT)) {
-        eprintln!("nvdb serve: cannot set write timeout: {error}");
-    }
-    let mut stream = stream;
-    let mut reader = BufReader::new(match stream.try_clone() {
-        Ok(clone) => clone,
-        Err(error) => {
-            eprintln!("nvdb serve: cannot clone connection: {error}");
-            return;
-        }
-    });
-    loop {
-        let request = match read_request(&mut reader, &mut stream) {
-            Ok(Some(request)) => request,
-            Ok(None) => return,
-            Err(rejection) => {
-                let mut response =
-                    Response::error(rejection.status, rejection.code, rejection.message);
-                let _ = response.write(&mut stream, false);
-                return;
-            }
-        };
-        let keep_alive = request.keep_alive;
-        let mut response = route(server, &request);
-        if response.write(&mut stream, keep_alive).is_err() || !keep_alive {
-            return;
+// ─── Router ─────────────────────────────────────────────────────────
+
+/// The route table. Patterns are nhttp's: `:name` is one path segment.
+///
+/// Every handler is `async` only at the edge: it owns the request, hands the
+/// synchronous engine call to [`offload`], and encodes the answer.
+fn router() -> Router<Arc<V2Server>> {
+    let router = Router::new()
+        .get("/health", handle_health)
+        .get("/v2/collections", handle_list_collections)
+        .post("/v2/collections", handle_create_collection)
+        .post("/v2/collections/:name/upsert", handle_upsert)
+        .post("/v2/collections/:name/delete", handle_delete)
+        .post("/v2/collections/:name/acl", handle_update_acl)
+        .post("/v2/collections/:name/commit", handle_commit)
+        .post("/v2/collections/:name/search", handle_search)
+        .post("/v2/collections/:name/hybrid_search", handle_hybrid_search)
+        .get(
+            "/v2/collections/:name/pending_embeddings",
+            handle_pending_embeddings,
+        )
+        .post(
+            "/v2/collections/:name/attach_vectors",
+            handle_attach_vectors,
+        )
+        .get("/v2/collections/:name/fingerprints", handle_fingerprints)
+        .post(
+            "/v2/collections/:name/integrity_check",
+            handle_integrity_check,
+        )
+        .post("/v2/collections/:name/watermark", handle_set_watermark)
+        .post("/v2/collections/:name/level2", handle_level2);
+    claim_unmatched(router)
+}
+
+/// nhttp answers an unmatched path with its own envelope; nVDB's contract is
+/// `404 {"error": ..., "code": "no_route"}`. Claiming every method/length shape
+/// keeps that contract. A static segment always outranks a parameter at the same
+/// position, so no real route can be stolen by a catch-all.
+fn claim_unmatched(mut router: Router<Arc<V2Server>>) -> Router<Arc<V2Server>> {
+    for method in [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::HEAD,
+        Method::OPTIONS,
+    ] {
+        for segments in 0..=CATCH_ALL_SEGMENTS {
+            let pattern = catch_all_pattern(segments);
+            router = router.route(method.clone(), &pattern, handle_no_route);
         }
     }
+    router
 }
 
-// ─── HTTP plumbing ──────────────────────────────────────────────────
-
-struct Request {
-    method: String,
-    path: String,
-    query: Option<String>,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    keep_alive: bool,
+fn catch_all_pattern(segments: usize) -> String {
+    let mut pattern = String::new();
+    for _ in 0..segments {
+        pattern.push_str("/:rest");
+    }
+    if pattern.is_empty() {
+        pattern.push('/');
+    }
+    pattern
 }
 
-impl Request {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
+// ─── Edge handlers ──────────────────────────────────────────────────
 
-    /// One `key=value` pair of the request target's query string.
-    ///
-    /// Only the shapes this server issues are supported: a flat list of
-    /// `key=value` pairs separated by `&`. Percent-decoding is not applied
-    /// because no route accepts free text through the query string.
-    fn query_value(&self, key: &str) -> Option<&str> {
-        self.query
-            .as_deref()?
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .find(|(name, _)| name == &key)
-            .map(|(_, value)| value)
-    }
+async fn handle_health(server: Arc<V2Server>, _request: Request) -> Response {
+    finish(offload(Arc::clone(&server), move || health(&server)).await)
 }
 
-/// Why the connection is answered and closed instead of routed.
-struct Rejection {
-    status: u16,
-    code: &'static str,
-    message: String,
+async fn handle_list_collections(server: Arc<V2Server>, _request: Request) -> Response {
+    finish(offload(Arc::clone(&server), move || list_collections(&server)).await)
 }
 
-impl Rejection {
-    fn new(status: u16, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            code,
-            message: message.into(),
-        }
-    }
+async fn handle_create_collection(server: Arc<V2Server>, request: Request) -> Response {
+    finish(offload(Arc::clone(&server), move || create_collection(&server, &request)).await)
 }
 
-fn read_request(
-    reader: &mut BufReader<TcpStream>,
-    stream: &mut TcpStream,
-) -> Result<Option<Request>, Rejection> {
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) => return Ok(None),
-        Ok(_) => {}
-        Err(_) => return Ok(None),
+async fn handle_upsert(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || upsert(&server, &name, &request)).await)
+}
+
+async fn handle_delete(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || delete(&server, &name, &request)).await)
+}
+
+async fn handle_update_acl(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || update_acl(&server, &name, &request)).await)
+}
+
+async fn handle_commit(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || commit(&server, &name)).await)
+}
+
+async fn handle_search(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || search(&server, &name, &request)).await)
+}
+
+async fn handle_hybrid_search(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || hybrid_search(&server, &name, &request)).await)
+}
+
+async fn handle_pending_embeddings(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || pending_embeddings(&server, &name, &request)).await)
+}
+
+async fn handle_attach_vectors(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || attach_vectors(&server, &name, &request)).await)
+}
+
+async fn handle_fingerprints(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || fingerprints(&server, &name)).await)
+}
+
+async fn handle_integrity_check(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || integrity_check(&server, &name, &request)).await)
+}
+
+async fn handle_set_watermark(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || set_watermark(&server, &name, &request)).await)
+}
+
+async fn handle_level2(server: Arc<V2Server>, request: Request) -> Response {
+    let name = name_param(&request);
+    finish(offload(Arc::clone(&server), move || level2(&server, &name, &request)).await)
+}
+
+async fn handle_no_route(server: Arc<V2Server>, request: Request) -> Response {
+    // `/metrics` is the one path the catch-all answers instead of refusing: the
+    // body is nhttp's own counter snapshot, byte for byte.
+    if request.method == Method::GET && request.path == "/metrics" {
+        return Response::json_raw(StatusCode::OK, server.metrics_snapshot().to_json());
     }
-    let line = line.trim_end();
-    if line.is_empty() {
-        return Ok(None);
-    }
-    let mut parts = line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| Rejection::new(400, "malformed_request", "missing method"))?
-        .to_string();
-    let target = parts
-        .next()
-        .ok_or_else(|| Rejection::new(400, "malformed_request", "missing path"))?
-        .to_string();
-    let version = parts.next().unwrap_or("HTTP/1.1");
-    let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path.to_string(), Some(query.to_string())),
-        None => (target, None),
+    ApiError::new(
+        404,
+        "no_route",
+        format!("no route: {} {}", request.method, request.path),
+    )
+    .into()
+}
+
+// ─── Edge plumbing ──────────────────────────────────────────────────
+
+/// Run a synchronous engine call on nhttp's blocking pool. The reactor thread
+/// keeps serving other connections while Tantivy, the dense lane or ONNX works.
+/// A 5xx outcome is recorded on the process logger before it becomes a response.
+async fn offload<F>(server: Arc<V2Server>, work: F) -> ApiResult
+where
+    F: FnOnce() -> ApiResult + Send + 'static,
+{
+    let outcome = match nhttp::spawn_blocking(work).await {
+        Ok(outcome) => outcome,
+        Err(error) => Err(ApiError::new(
+            500,
+            "engine_failure",
+            format!("blocking worker: {error}"),
+        )),
     };
-
-    let mut headers = Vec::new();
-    loop {
-        let mut header_line = String::new();
-        reader.read_line(&mut header_line).map_err(|error| {
-            Rejection::new(400, "malformed_request", format!("header read: {error}"))
-        })?;
-        let header_line = header_line.trim_end();
-        if header_line.is_empty() {
-            break;
-        }
-        if let Some((key, value)) = header_line.split_once(':') {
-            headers.push((key.trim().to_string(), value.trim().to_string()));
-        }
+    if let Err(error) = &outcome {
+        server.log_failure(error);
     }
-
-    let mut request = Request {
-        method,
-        path,
-        query,
-        headers,
-        body: Vec::new(),
-        keep_alive: !version.eq_ignore_ascii_case("HTTP/1.0"),
-    };
-    for (key, value) in &request.headers {
-        if key.eq_ignore_ascii_case("connection") {
-            if value.eq_ignore_ascii_case("close") {
-                request.keep_alive = false;
-            } else if value.eq_ignore_ascii_case("keep-alive") {
-                request.keep_alive = true;
-            }
-        }
-    }
-
-    let content_length = request
-        .header("content-length")
-        .map(|value| value.trim().parse::<usize>())
-        .transpose()
-        .map_err(|error| {
-            Rejection::new(
-                400,
-                "malformed_request",
-                format!("invalid content-length: {error}"),
-            )
-        })?
-        .unwrap_or(0);
-    if content_length > MAX_BODY {
-        return Err(Rejection::new(
-            413,
-            "payload_too_large",
-            format!("body of {content_length} bytes exceeds {MAX_BODY}"),
-        ));
-    }
-
-    // curl sends this for bodies above ~1KB; not answering stalls the client.
-    if let Some(expect) = request.header("expect") {
-        if expect.eq_ignore_ascii_case("100-continue") {
-            stream
-                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                .map_err(|error| {
-                    Rejection::new(400, "malformed_request", format!("continue write: {error}"))
-                })?;
-        }
-    }
-
-    if content_length > 0 {
-        request.body.resize(content_length, 0);
-        reader.read_exact(&mut request.body).map_err(|error| {
-            Rejection::new(400, "malformed_request", format!("body read: {error}"))
-        })?;
-    }
-    Ok(Some(request))
+    outcome
 }
 
-struct Response {
-    status: u16,
-    body: Value,
-}
-
-impl Response {
-    fn ok(body: Value) -> Self {
-        Self { status: 200, body }
-    }
-
-    fn error(status: u16, code: &str, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            body: json!({ "error": message.into(), "code": code }),
-        }
-    }
-
-    fn write(&mut self, stream: &mut TcpStream, keep_alive: bool) -> std::io::Result<()> {
-        let payload = serde_json::to_vec(&self.body)?;
-        let connection = if keep_alive { "keep-alive" } else { "close" };
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
-            self.status,
-            reason(self.status),
-            payload.len(),
-            connection
-        );
-        stream.write_all(head.as_bytes())?;
-        stream.write_all(&payload)?;
-        stream.flush()
+fn finish(outcome: ApiResult) -> Response {
+    match outcome {
+        Ok(body) => Response::json_raw(StatusCode::OK, encode(&body)),
+        Err(error) => error.into(),
     }
 }
 
-fn reason(status: u16) -> &'static str {
-    match status {
-        200 => "OK",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        409 => "Conflict",
-        413 => "Payload Too Large",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "Unknown",
-    }
+fn encode(body: &Value) -> Vec<u8> {
+    serde_json::to_vec(body).expect("a serde_json::Value always serializes")
+}
+
+/// The one path parameter every collection route carries.
+fn name_param(request: &Request) -> String {
+    request
+        .param("name")
+        .expect("the router only reaches a :name route with a name")
+        .to_string()
+}
+
+/// One `key=value` pair of the request target's query string.
+///
+/// Only the shapes this server issues are supported: a flat list of
+/// `key=value` pairs separated by `&`. Percent-decoding is not applied because
+/// no route accepts free text through the query string, and a bare `?limit`
+/// (no `=`) still means "absent", exactly as before the nhttp move.
+fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| value)
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────
@@ -645,54 +757,18 @@ impl ApiError {
 
 impl From<ApiError> for Response {
     fn from(error: ApiError) -> Self {
-        Response::error(error.status, error.code, error.message)
+        let status = StatusCode::from_u16(error.status)
+            .expect("every ApiError status is a valid HTTP status code");
+        Response::json_raw(
+            status,
+            encode(&json!({ "error": error.message, "code": error.code })),
+        )
     }
 }
 
 type ApiResult = Result<Value, ApiError>;
 
-// ─── Routing ────────────────────────────────────────────────────────
-
-fn route(server: &V2Server, request: &Request) -> Response {
-    match dispatch(server, request) {
-        Ok(body) => Response::ok(body),
-        Err(error) => error.into(),
-    }
-}
-
-fn dispatch(server: &V2Server, request: &Request) -> ApiResult {
-    let segments: Vec<&str> = request.path.split('/').filter(|s| !s.is_empty()).collect();
-    match (request.method.as_str(), segments.as_slice()) {
-        ("GET", ["health"]) => health(server),
-        ("GET", ["v2", "collections"]) => list_collections(server),
-        ("POST", ["v2", "collections"]) => create_collection(server, request),
-        ("POST", ["v2", "collections", name, "upsert"]) => upsert(server, name, request),
-        ("POST", ["v2", "collections", name, "delete"]) => delete(server, name, request),
-        ("POST", ["v2", "collections", name, "acl"]) => update_acl(server, name, request),
-        ("POST", ["v2", "collections", name, "commit"]) => commit(server, name),
-        ("POST", ["v2", "collections", name, "search"]) => search(server, name, request),
-        ("POST", ["v2", "collections", name, "hybrid_search"]) => {
-            hybrid_search(server, name, request)
-        }
-        ("GET", ["v2", "collections", name, "pending_embeddings"]) => {
-            pending_embeddings(server, name, request)
-        }
-        ("POST", ["v2", "collections", name, "attach_vectors"]) => {
-            attach_vectors(server, name, request)
-        }
-        ("GET", ["v2", "collections", name, "fingerprints"]) => fingerprints(server, name),
-        ("POST", ["v2", "collections", name, "integrity_check"]) => {
-            integrity_check(server, name, request)
-        }
-        ("POST", ["v2", "collections", name, "watermark"]) => set_watermark(server, name, request),
-        ("POST", ["v2", "collections", name, "level2"]) => level2(server, name, request),
-        _ => Err(ApiError::new(
-            404,
-            "no_route",
-            format!("no route: {} {}", request.method, request.path),
-        )),
-    }
-}
+// ─── Routes ─────────────────────────────────────────────────────────
 
 fn health(server: &V2Server) -> ApiResult {
     Ok(json!({
@@ -928,7 +1004,7 @@ fn hybrid_search(server: &V2Server, name: &str, request: &Request) -> ApiResult 
 }
 
 fn pending_embeddings(server: &V2Server, name: &str, request: &Request) -> ApiResult {
-    let limit = match request.query_value("limit") {
+    let limit = match query_value(request.query.as_deref(), "limit") {
         Some(raw) => raw.parse::<usize>().map_err(|error| {
             ApiError::bad_request(
                 "invalid_limit",

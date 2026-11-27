@@ -28,6 +28,10 @@ nvdb serve --dir <collection-root> [--host 127.0.0.1] [--port 3510] [--reranker-
 | `--host` | `127.0.0.1` | Bind address (`0.0.0.0` for LAN) |
 | `--port` | `3510` | Port, `1..=65535` |
 | `--reranker-model` | none | Directory with `model.onnx` + `tokenizer.json` |
+| `--logs-dir` | `./logs` | nlogger JSONL output (`nvdb-<id>.log` + rotated `main-N.log`) |
+| `--token` | none (open) | Require `Authorization: Bearer <token>`; `/health` and `/metrics` stay exempt |
+
+`GET /metrics` is the nhttp transport counter snapshot.
 
 Startup behaviour:
 
@@ -230,6 +234,7 @@ Body: `{"error": "...", "code": "..."}`.
 | Status | Codes |
 |---|---|
 | `400` | malformed body, invalid name (traversal included), `MissingPrincipals`, `WrongDimension`, `vector_lane_not_configured`, `invalid_watermark` |
+| `401` | bearer auth on, missing/invalid token (nhttp transport envelope) |
 | `403` | non-v2 directory the server refuses to take over |
 | `404` | unknown route or collection |
 | `409` | config/version conflict, `stale_vector_cas` |
@@ -237,11 +242,14 @@ Body: `{"error": "...", "code": "..."}`.
 | `500` | IO, corrupt state, `rerank_failed` |
 | `503` | `index_degraded`, `reranker_not_configured`, connection cap |
 
+Transport-level rejections (`401`, `413`, the connection-cap `503`) carry nhttp's own
+`{"error","message"}` envelope and happen before a route runs.
+
 Collection names match `[a-zA-Z0-9._-]+`; `.` and `..` are rejected, so a name can never escape the collection root.
 
 ### Limits
 
-Hand-rolled HTTP/1.1 on `std::net`: thread per connection behind a 64-connection cap, keep-alive, 30 s read/write timeouts, 64 MB body cap.
+`nhttp` (tokio + hyper) with `nlogger`: one router, a 1024-connection cap, keep-alive, 30 s read/idle/write timeouts, a 64 MB body cap and a graceful drain. The engine is synchronous and every call — Tantivy, the dense lane, ONNX — runs on `nhttp::spawn_blocking`, so a reactor thread never stalls behind an index lock. `GET /metrics` is nhttp's built-in counter snapshot. `nvdb serve --logs-dir <path>` (default `./logs`) writes `nvdb-<id>.log` and the rotated `main-N.log` JSONL stream; `LOG_LEVEL` / `LOG_RETENTION_DAYS` override the defaults. A cap rejection answers `503` with nhttp's transport envelope, not the route envelope below.
 
 ## Tests
 
